@@ -495,10 +495,14 @@ pub static SIGNATURES: &[Signature] = &[
                 Ty::Any,
                 "field name (String), or fn(record) -> Any",
             ),
-            opt("order", Ty::Str, r#""desc" for descending; default ascending"#),
+            opt(
+                "order",
+                Ty::Str,
+                r#""desc" (or "descending") for descending; default ascending"#,
+            ),
         ],
         returns: "Array",
-        doc: "Sort an array of records by a field name or a lambda.",
+        doc: "Sort an array of records by a field name or a one-argument lambda key.",
         examples: &[
             (r#"[{n: 2}, {n: 1}] | sort_by("n") | first | fn(r) => r.n"#, "1"),
             (r#"[{n: 1}, {n: 2}] | sort_by("n", "desc") | first | fn(r) => r.n"#, "2"),
@@ -506,15 +510,28 @@ pub static SIGNATURES: &[Signature] = &[
         ],
     },
     Signature {
+        // Pipeline only, like `uniq`: `bi_sort` reads its subject from `input`,
+        // so the direct form is not supported. `flags` is the `-r`/`--reverse`
+        // the body accepts, and declaring it `String` refuses a comparator
+        // lambda before the body runs; a parameterless declaration refused the
+        // flag instead.
         name: "sort",
         category: None,
-        subject_required: false,
+        subject_required: true,
         aliases: &[],
         subject: Some(Ty::Sequence),
-        params: &[],
+        params: &[opt_rest(
+            "flags",
+            Ty::Str,
+            "-r or --reverse to sort descending; there is no comparator argument",
+        )],
         returns: "Array",
-        doc: "Sort an array ascending by natural ordering.",
-        examples: &[("[3, 1, 2] | sort", "[1, 2, 3]")],
+        doc: "Sort an array, or a piped string's lines, ascending by natural ordering; -r/--reverse sorts descending. Pipeline only, with no comparator.",
+        examples: &[
+            ("[3, 1, 2] | sort", "[1, 2, 3]"),
+            (r#"[3, 1, 2] | sort("-r")"#, "[3, 2, 1]"),
+            (r#""b\na" | sort"#, r#"["a", "b"]"#),
+        ],
     },
     Signature {
         name: "first",
@@ -1788,6 +1805,24 @@ pub static SIGNATURES: &[Signature] = &[
         examples: &[("typeof(time())", "Int")],
     },
     Signature {
+        // One required numeric duration in seconds (`Duration::from_secs_f64`),
+        // returning Null. Without a declaration the catalogue derived
+        // `sleep() -> Value` with no parameters from the name.
+        name: "sleep",
+        category: None,
+        subject_required: false,
+        aliases: &[],
+        subject: None,
+        params: &[req(
+            "seconds",
+            Ty::Numeric,
+            "non-negative seconds to pause for; fractions are accepted",
+        )],
+        returns: "Null",
+        doc: "Pause for a non-negative number of seconds; fractional seconds are accepted. A negative duration is refused.",
+        examples: &[("sleep(0)", "null"), ("sleep(0.001)", "null")],
+    },
+    Signature {
         name: "audit_stats",
         category: None,
         subject_required: false,
@@ -2803,6 +2838,25 @@ pub static SIGNATURES: &[Signature] = &[
         ],
     },
     Signature {
+        // Its own entry rather than an alias of `from-json`: the two are
+        // separate implementations, and `aliases` means "other spellings that
+        // dispatch here". Without it the catalogue derived
+        // `json_parse() -> Value` with no parameters from the name.
+        name: "json_parse",
+        category: None,
+        subject_required: false,
+        aliases: &[],
+        subject: Some(Ty::Str),
+        params: &[],
+        returns: "Any",
+        doc: "Parse a JSON string, piped or passed as the single argument, into typed values. JSON null becomes null rather than a string.",
+        examples: &[
+            (r#"json_parse("null")"#, "null"),
+            (r#"typeof(json_parse("null"))"#, "Null"),
+            (r#""[1, 2]" | json_parse | len"#, "2"),
+        ],
+    },
+    Signature {
         name: "json_stringify",
         category: None,
         subject_required: false,
@@ -2810,9 +2864,10 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Any),
         params: &[],
         returns: "String",
-        doc: "A value as compact JSON.",
+        doc: "A value as compact JSON. A null is the JSON literal null, not the string \"null\".",
         examples: &[
             (r#"json_stringify({a: 1})"#, r#"{"a":1}"#),
+            (r#"json_stringify(null)"#, "null"),
         ],
     },
     Signature {

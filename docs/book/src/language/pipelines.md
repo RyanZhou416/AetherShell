@@ -147,14 +147,14 @@ http_get "https://api.example.com/users" | from_json | where fn(u) => u.active
 
 ## Pipeline Input in Builtins
 
-Builtins can access pipeline input implicitly. For example, `sort` works both ways:
+Builtins can access pipeline input implicitly. `sort` requires its array or text as pipeline input; its explicit arguments select options rather than supply the subject:
 
 ```ae
-sort [3, 1, 2]        # Direct call with argument
-[3, 1, 2] | sort      # Pipeline: input received implicitly
+[3, 1, 2] | sort             # => [1, 2, 3]
+[3, 1, 2] | sort("-r")       # => [3, 2, 1]
 ```
 
-This dual calling convention makes builtins equally useful in both interactive and pipeline contexts.
+Use `sort_by("size", "desc")` or `sort_by(fn(row) => row.size, "desc")` for records. A two-argument comparison lambda is not a supported `sort` argument.
 
 ## Chaining with AI
 

@@ -124,7 +124,7 @@ let fetch_with_retry = fn(url) => {
     let result = try { http_get url } catch { null }
     if result { result }
     else {
-        sleep 1000
+        sleep(1) # Retry after one second.
         try { http_get url } catch e {
             throw "Failed after retry: ${e}"
         }

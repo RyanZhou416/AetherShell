@@ -127,6 +127,13 @@ let s = json_stringify rec
 echo s               # {"x":1,"y":[2,3]}
 ```
 
+JSON nulls retain their native null type through parsing and serialization, including inside arrays and records. The strings `"null"` and `"<null>"` remain strings.
+
+```aethershell
+json_parse("null") == None             # true
+json_stringify({missing: None})        # "{\"missing\":null}"
+```
+
 ### `save_json` / `write_json`
 Write a value as formatted JSON to a file.
 
@@ -156,10 +163,11 @@ echo "Took ${elapsed}ms"
 ```
 
 ### `sleep`
-Pause execution for a given number of milliseconds.
+Pause execution for a non-negative duration in seconds. Fractional seconds are accepted.
 
 ```aethershell
-sleep 1000           # Sleep for 1 second
+sleep(1)             # Sleep for 1 second
+sleep(0.1)           # Sleep for 100 milliseconds
 ```
 
 ## Shell Interop

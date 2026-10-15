@@ -129,6 +129,16 @@ Extract a sub-array by start index and length.
 
 ## Ordering
 
+### `sort`
+Sort piped numbers or strings in natural order. Pass `"-r"` or `"--reverse"` to reverse the order; `sort` does not accept a comparison lambda.
+
+```aethershell
+[3, 1, 2] | sort            # [1, 2, 3]
+[3, 1, 2] | sort("-r")      # [3, 2, 1]
+```
+
+For records or a computed key, use `sort_by` instead.
+
 ### `sort_by`
 Sort an array of records by a field, with optional direction.
 

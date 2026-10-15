@@ -7999,9 +7999,21 @@ fn bi_find(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
 // of those four, so no pattern that worked before behaves differently.
 
 fn bi_sort(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
-    let reverse = args
-        .iter()
-        .any(|arg| matches!(arg, Value::Str(s) if s == "-r" || s == "--reverse"));
+    // `-r`/`--reverse` are the only flags `sort` has, and validation refuses a
+    // non-String argument, so an unknown flag is refused rather than dropped.
+    let mut reverse = false;
+    for arg in &args {
+        match arg {
+            Value::Str(s) if s == "-r" || s == "--reverse" => reverse = true,
+            other => {
+                return Err(crate::safety::bad_arg(
+                    "sort",
+                    "-r or --reverse (or omit flags); use sort_by for a key",
+                    &value_to_string(other),
+                ))
+            }
+        }
+    }
 
     let array = if let Some(input) = input {
         match input {
@@ -9013,6 +9025,9 @@ fn json_to_value(json: serde_json::Value) -> Value {
 
 fn value_to_json(value: Value) -> serde_json::Value {
     match value {
+        // Null serializes as JSON `null`; the `_` arm below would render the
+        // text `<null>`, which re-parses as a String.
+        Value::Null => serde_json::Value::Null,
         Value::Str(s) => serde_json::Value::String(s),
         Value::Int(i) => serde_json::Value::Number(serde_json::Number::from(i)),
         Value::Float(f) => serde_json::Value::Number(
@@ -12821,7 +12836,14 @@ fn bi_sleep(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         ));
     }
 
-    std::thread::sleep(Duration::from_secs_f64(seconds));
+    let duration = Duration::try_from_secs_f64(seconds).map_err(|_| {
+        crate::safety::bad_arg(
+            "sleep",
+            "finite non-negative seconds representable as a duration",
+            &seconds.to_string(),
+        )
+    })?;
+    std::thread::sleep(duration);
     Ok(Value::Null)
 }
 
@@ -19296,21 +19318,19 @@ fn bi_sort_by(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<V
         ));
     }
 
-    // Extract keys for each element
-    let mut keyed: Vec<(Value, Value)> = arr
-        .iter()
-        .map(|item| {
-            let key = match (&lambda, &field) {
-                (Some(l), _) => call_lambda(l, &[item.clone()], env).unwrap_or(Value::Null),
-                (None, Some(f)) => match item {
-                    Value::Record(m) => m.get(f).cloned().unwrap_or(Value::Null),
-                    _ => Value::Null,
-                },
-                (None, None) => Value::Null,
-            };
-            (key, item.clone())
-        })
-        .collect();
+    // Propagate key-function failures; missing record fields still use Null keys.
+    let mut keyed: Vec<(Value, Value)> = Vec::with_capacity(arr.len());
+    for item in arr {
+        let key = match (&lambda, &field) {
+            (Some(l), _) => call_lambda(l, &[item.clone()], env)?,
+            (None, Some(f)) => match item {
+                Value::Record(m) => m.get(f).cloned().unwrap_or(Value::Null),
+                _ => Value::Null,
+            },
+            (None, None) => Value::Null,
+        };
+        keyed.push((key, item.clone()));
+    }
 
     // Sort by keys
     keyed.sort_by(|(a, _), (b, _)| {

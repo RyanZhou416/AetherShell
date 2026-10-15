@@ -91,7 +91,7 @@ cat "access.log"
       {
         count: len latencies,
         avg_ms: avg latencies,
-        p50: sort latencies | nth(len(latencies) / 2),
+        p50: (latencies | sort | nth(len(latencies) / 2)),
         max: max latencies
       }
   })

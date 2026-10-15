@@ -100,7 +100,7 @@ nodes | each(fn(node) => {
 
   # Remove from load balancer
   echo "  Draining connections..."
-  sleep 5000
+  sleep(5)
 
   # Deploy. Use ssh_exec: it really runs the command. `remote_exec` is a stub
   # that reports `simulated` and executes nothing — in a rolling deploy that
