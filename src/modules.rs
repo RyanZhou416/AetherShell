@@ -519,6 +519,9 @@ pub fn str_module() -> Value {
         ("starts_with", "starts_with"),
         ("ends_with", "ends_with"),
         ("len", "len"),
+        // str.len retains UTF-8 byte semantics; char_len counts Unicode scalar values.
+        ("char_len", "char_len"),
+        ("byte_len", "byte_len"),
     ])
 }
 

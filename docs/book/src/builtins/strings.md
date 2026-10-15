@@ -30,6 +30,66 @@ trim "  hello  "       # "hello"
 "  spaced  " | trim    # "spaced"
 ```
 
+## Length
+
+A string has two honest lengths, and the shell names both rather than picking one
+for you. There is no third: grapheme clusters are not counted, because the shell
+does no segmentation.
+
+### `len` / `length`
+Count **UTF-8 bytes** in a string.
+
+```aethershell
+len "hello"   # 5
+len "你好"    # 6
+len "😀"      # 4
+```
+
+`str.len` is the same builtin and returns the same number, so the byte measure
+existing scripts and content tooling already rely on does not change.
+
+### `char_len`
+Count **Unicode scalar values** — the characters the text is written from. A
+combining mark is its own scalar, and an emoji built with zero-width joiners is
+counted scalar by scalar even though a UI draws one glyph.
+
+```aethershell
+char_len "你好"   # 2
+char_len "😀"     # 1
+char_len ""       # 0
+```
+
+### `byte_len`
+Count **UTF-8 bytes** in a string — the same number `len` gives. It exists so a
+call can say which measure it means without relying on `len`'s history.
+
+```aethershell
+byte_len "你好"   # 6
+byte_len "😀"     # 4
+```
+
+### Two ways to write `é`
+The precomposed character U+00E9 and the sequence `e` + U+0301 COMBINING ACUTE
+ACCENT look alike in a terminal and are different strings. These builtins say so:
+
+```aethershell
+char_len "é"    # 2  (e followed by the combining accent)
+byte_len "é"    # 3
+char_len "é"    # 1  (precomposed U+00E9)
+byte_len "é"    # 2
+```
+
+A family emoji written with zero-width joiners is five scalars in eighteen bytes,
+not one:
+
+```aethershell
+char_len "👨‍👩‍👧"   # 5
+byte_len "👨‍👩‍👧"   # 18
+```
+
+All three are also members of the string module: `str.len`, `str.char_len` and
+`str.byte_len`.
+
 ## Splitting & Joining
 
 ### `split`

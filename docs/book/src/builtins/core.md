@@ -61,6 +61,22 @@ inspect [1, "two", true]
 # "[Int(1), String(\"two\"), Bool(true)]"
 ```
 
+### `len` / `char_len` / `byte_len`
+Length depends on what is being measured, so the shell names each measure instead
+of silently choosing one for you. `len` counts a string's UTF-8 bytes, an array's
+elements, and a record's fields; `byte_len` is the same byte count for a string
+stated explicitly; `char_len` counts Unicode scalar values. Grapheme clusters are
+not counted.
+
+```aethershell
+len [1, 2, 3]        # 3
+len "你好"           # 6
+char_len "你好"      # 2
+```
+
+See [`len`](./collections.md#len--length) for the container forms and
+[String Operations](./strings.md#length) for the string measures.
+
 ## Option Types
 
 AetherShell has first-class `Some`/`None` for representing optional values.

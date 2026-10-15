@@ -4017,6 +4017,8 @@ pub const FALLBACK_BUILTINS: &[(&str, &str)] = &[
     ("ai_set_load_balancing", "bi_ai_set_load_balancing"),
     ("ai_supported_conversions", "bi_ai_supported_conversions"),
     ("ai_usage", "bi_ai_usage"),
+    ("byte_len", "bi_byte_len"),
+    ("char_len", "bi_char_len"),
     ("columns", "bi_columns"),
     ("complete", "bi_ai_complete"),
     ("describe", "bi_describe"),
@@ -4290,6 +4292,13 @@ fn call_with_input_inner(
         "ontology_jsonld" => bi_ontology_jsonld(),
         "ontology_owl" => bi_ontology_owl(),
         "ontology_shacl" => bi_ontology_shacl(),
+
+        // String length in Unicode scalar values or UTF-8 bytes. Registered in
+        // the fallback half for the same reason as the handle family below:
+        // `BUILTIN_LOOKUP` is index-coupled to `BUILTIN_DISPATCH`, and
+        // reachability here is identical without touching that table.
+        "char_len" => bi_char_len(args, input),
+        "byte_len" => bi_byte_len(args, input),
 
         // Result handles (§ see crate::handles). Registered here rather than in
         // BUILTIN_LOOKUP because that table is index-coupled to BUILTIN_DISPATCH;
@@ -5741,6 +5750,43 @@ fn bi_len(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     };
 
     Ok(Value::Int(length as i64))
+}
+
+/// The string a length builtin was handed, through the pipe or positionally.
+///
+/// A non-string is refused with a code naming the type it wanted rather than
+/// counted from its rendered form: `len` accepts the containers, these two are
+/// the string measures.
+fn string_for_length(name: &str, args: Vec<Value>, input: Option<Value>) -> Result<String> {
+    let val = if let Some(input_val) = input {
+        input_val
+    } else if !args.is_empty() {
+        args[0].clone()
+    } else {
+        return Err(crate::safety::bad_arg(name, "a String", "nothing"));
+    };
+    match val {
+        Value::Str(s) => Ok(s),
+        Value::Uri(u) => Ok(u),
+        other => Err(crate::safety::bad_arg(name, "a String", other.type_name())),
+    }
+}
+
+/// `char_len(s)` — Unicode **scalar values** in a string.
+///
+/// `chars().count()`, deliberately not grapheme clusters: the language has no
+/// segmentation, so a ZWJ emoji sequence counts every scalar it is written
+/// from. `len` remains the UTF-8 byte count so existing byte-consuming scripts
+/// do not change size under them.
+fn bi_char_len(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    let s = string_for_length("char_len", args, input)?;
+    Ok(Value::Int(s.chars().count() as i64))
+}
+
+/// `byte_len(s)` — UTF-8 bytes in a string, the same count `len` gives one.
+fn bi_byte_len(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    let s = string_for_length("byte_len", args, input)?;
+    Ok(Value::Int(s.len() as i64))
 }
 
 /// `str(v)` — render a value as the string a user would see.

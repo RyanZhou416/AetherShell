@@ -276,14 +276,29 @@ try {
     $requests = @(
         @{ Id = 'B1'; Name = 'call-len'; RequestText = '{"action":"call","builtin":"len","args":[[1,2,3]]}' },
         @{ Id = 'B2'; Name = 'pipeline-where-select'; RequestText = '{"action":"pipeline","input":[{"size":1},{"size":5},{"size":9}],"steps":[{"builtin":"where","predicate":"size > 2","select":"size"}]}' },
-        @{ Id = 'B3'; Name = 'ontology-manifest'; RequestText = '{"action":"call","builtin":"ontology_manifest","args":[]}' }
+        @{ Id = 'B3'; Name = 'ontology-manifest'; RequestText = '{"action":"call","builtin":"ontology_manifest","args":[]}' },
+        @{ Id = 'B4'; Name = 'typed-data-capabilities'; RequestText = '{"action":"capabilities"}'; Expected = '{"protocol":"aethershell-agent-api","protocol_version":1,"features":{"typed_arguments_v1":true,"typed_pipeline_input_v1":true,"explicit_null_pipeline_input_v1":true}}' },
+        @{ Id = 'B5'; Name = 'typed-record-literals'; RequestText = '{"action":"call","builtin":"first","args":[[{"a-b":"literal ${1+2}","中文":null}]]}'; Expected = '{"a-b":"literal ${1+2}","中文":null}' },
+        @{ Id = 'B6'; Name = 'typed-null-seed'; RequestText = '{"action":"pipeline","input":null,"steps":[{"builtin":"type_of"}]}'; Expected = '"Null"' },
+        @{ Id = 'B7'; Name = 'unicode-scalar-length'; RequestText = '{"action":"call","builtin":"char_len","args":["你好😀"]}'; Expected = '3' }
     )
     foreach ($request in $requests) {
         $run = Invoke-Ae -Arguments @('agent', 'execute') -Stdin $request.RequestText
         $document = $null
         try { $document = $run.Out | ConvertFrom-Json -ErrorAction Stop } catch { $document = $null }
-        Add-Result $request.Id $request.Name (($null -ne $document) -and ($document.success -eq $true) -and ($run.ExitCode -eq 0)) `
-            "success=$($document.success) exit=$($run.ExitCode)"
+        $matches = $true
+        if ($request.Id -eq 'B4' -and $null -ne $document) {
+            $cap = $document.result
+            $matches = ($cap.protocol -ceq 'aethershell-agent-api') -and ($cap.protocol_version -eq 1) -and
+                ($cap.features.typed_arguments_v1 -ceq $true) -and ($cap.features.typed_pipeline_input_v1 -ceq $true) -and
+                ($cap.features.explicit_null_pipeline_input_v1 -ceq $true)
+        } elseif ($request.ContainsKey('Expected') -and $null -ne $document) {
+            $actual = ConvertTo-Json -InputObject $document.result -Compress -Depth 20
+            $normalized = ConvertTo-Json -InputObject ($request.Expected | ConvertFrom-Json) -Compress -Depth 20
+            $matches = $actual -ceq $normalized
+        }
+        Add-Result $request.Id $request.Name (($null -ne $document) -and ($document.success -eq $true) -and ($run.ExitCode -eq 0) -and $matches) `
+            "success=$($document.success) exit=$($run.ExitCode) expectedValueMatches=$matches"
     }
 
     [Console]::Error.WriteLine('')

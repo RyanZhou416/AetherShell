@@ -74,7 +74,7 @@ All endpoints return `AgentResponse`:
   "result": <any>,
   "error": "string (on failure)",
   "result_type": "String | Int | Array | Record | ...",
-  "metadata": { "code_executed": "..." }
+  "metadata": { "structured_data": "typed-v1", "action": "call" }
 }
 ```
 
@@ -100,6 +100,7 @@ Universal entry point. Accepts any `AgentRequest` variant via the `action` discr
 | `list_builtins` | `category?: string`                    | List available builtins       |
 | `schema`        | `format?: SchemaFormat`                | Get language ontology/schema  |
 | `type_info`     | `type_name?: string`                   | Get type system information   |
+| `capabilities`  | none                                   | Report protocol version and typed-data features |
 
 **Example — call:**
 ```json
@@ -107,7 +108,7 @@ POST /api/v1/execute
 {
   "action": "call",
   "builtin": "ls",
-  "args": { "path": "." }
+  "args": ["."]
 }
 ```
 
@@ -117,14 +118,43 @@ POST /api/v1/execute
 {
   "action": "pipeline",
   "steps": [
-    { "builtin": "ls", "args": { "path": "." } },
-    { "builtin": "where", "predicate": "size > 1000" },
-    { "builtin": "select", "args": ["name"] }
+    { "builtin": "ls", "args": ["."] },
+    { "builtin": "where", "predicate": "size > 1000", "select": "name" }
   ]
 }
 ```
 
 ---
+
+### Typed data and capability discovery
+
+The same `AgentRequest` documents are accepted on stdin by `ae agent execute`; no HTTP server is needed for a local caller. `call` arguments and pipeline input are decoded directly into native values. Strings containing `${...}`, quotes, newlines and arbitrary record keys are not parsed as AetherShell source. Only `eval.code` and pipeline predicates are executable source.
+
+Prefer positional argument arrays: `args: [{"a-b": "${1+2}"}]` passes one record unchanged. Omitted/null `args`, an empty array and an empty object mean no arguments. A scalar is one argument. The historical top-level object shim accepts exactly one `input`, `value` or `path` field; mixing one of those fields with other fields is refused instead of discarding data. Other top-level objects are one record argument. An array argument must itself occupy one position, for example `args: [[1,2,3]]`.
+
+Consumers replacing older JSON-to-source behavior must first send `{"action":"capabilities"}` and require the supported protocol version and all needed features. This build returns:
+
+```json
+{
+  "success": true,
+  "result": {
+    "protocol": "aethershell-agent-api",
+    "protocol_version": 1,
+    "features": {
+      "typed_arguments_v1": true,
+      "typed_pipeline_input_v1": true,
+      "explicit_null_pipeline_input_v1": true
+    }
+  },
+  "result_type": "Capabilities"
+}
+```
+
+Typed call/pipeline responses carry `metadata.structured_data: "typed-v1"` and an `action`; failures identify the builtin where available. They do not claim that generated source ran. Explicit `eval` responses retain `code_executed` or `code_attempted`. Native integers are signed 64-bit; unsigned integers above that range are refused. A JavaScript consumer must impose its own narrower exact-integer limit or carry large identifiers as strings.
+
+Selectors split on dots and treat each segment as a literal record key, including keys such as `a-b` or `中文`; a missing field is an error. Use a complete lambda such as `fn(row) => len(row.items) > 2` for expressions beyond the shorthand predicate forms. An explicit `input: null` starts with native null; omitting input starts from the first step's call.
+
+Argument conversion, predicate syntax and selector-path syntax are checked for every step before the first builtin runs. A predicate must form one lambda expression; constructing it runs no statements. Builtin argument acceptance, policy decisions and data-dependent selector errors are runtime checks. A runtime failure leaves earlier steps' effects in place: a pipeline is a sequence of calls, not a transaction.
 
 ### POST `/api/v1/call/:builtin`
 
@@ -138,7 +168,7 @@ Shorthand to call a single builtin by name.
 **Example:**
 ```json
 POST /api/v1/call/ls
-{ "path": "/tmp" }
+["."]
 ```
 
 ---
@@ -153,7 +183,7 @@ Execute a multi-step pipeline.
   "steps": [
     {
       "builtin": "string",
-      "args": {},
+      "args": [],
       "select": "field_name",
       "predicate": "size > 100"
     }
@@ -166,10 +196,10 @@ Execute a multi-step pipeline.
 | ------------------- | -------------- | -------- | ---------------------------------------- |
 | `steps`             | PipelineStep[] | yes      | Ordered list of pipeline operations      |
 | `steps[].builtin`   | string         | yes      | Function name                            |
-| `steps[].args`      | any            | no       | Positional array or named object args    |
-| `steps[].select`    | string         | no       | Field selector (e.g., `"name"`)          |
-| `steps[].predicate` | string         | no       | Filter expression (e.g., `"size > 100"`) |
-| `input`             | any            | no       | Initial pipeline input value             |
+| `steps[].args`      | any            | no       | Prefer a positional argument array; predicate replaces it |
+| `steps[].select`    | string         | no       | Dot-separated literal field keys projected from each array element |
+| `steps[].predicate` | string         | no       | Executable lambda or expression: `size > 100`, `.size > 100`, `x.size > 100`, or `x > 100` |
+| `input`             | any            | no       | Initial typed value; explicit null is different from omission |
 
 ---
 

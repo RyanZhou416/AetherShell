@@ -17,21 +17,35 @@
 //! files | where(fn(f) => f.size > 1000) | map(fn(f) => f.name)
 //! ```
 //!
-//! AI agents can use structured JSON:
+//! AI agents send structured JSON whose values stay data. `args` is a
+//! positional array and every element becomes a native value directly, never
+//! source text, so `${…}`, quotes, newlines and any record key are inert:
 //! ```json
 //! {
 //!   "action": "call",
 //!   "builtin": "ls",
-//!   "args": { "path": "." }
+//!   "args": ["."]
 //! }
 //! ```
+//!
+//! A top-level object naming none of `input`/`value`/`path` is passed as one
+//! `Record` argument, so no field is silently dropped. The pre-typed API's
+//! named form survives only for an object whose *only* field is one of those
+//! three.
+//!
+//! `call` and `pipeline` mark their envelopes with
+//! `"structured_data": "typed-v1"` in `metadata`; `eval` remains the escape
+//! hatch for a program that is deliberately source. `{"action":"capabilities"}`
+//! reports the protocol version and the typed features this build serves.
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
+use crate::ast::{Expr, Stmt};
 use crate::builtins::BUILTIN_LOOKUP;
+use crate::env::Env;
 use crate::eval::eval_program;
 use crate::marketplace::{RegistryClient, SearchQuery, SortBy};
 use crate::modules::all_modules;
@@ -55,7 +69,13 @@ pub enum AgentRequest {
     /// Execute a pipeline of operations
     Pipeline {
         steps: Vec<PipelineStep>,
-        #[serde(default)]
+        /// The seed value. Omitted starts from the first step; a present JSON
+        /// null is the `Null` value and is a seed like any other.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_present_option"
+        )]
         input: Option<JsonValue>,
     },
     /// Execute raw AetherShell code (escape hatch)
@@ -77,6 +97,23 @@ pub enum AgentRequest {
         #[serde(default)]
         type_name: Option<String>,
     },
+    /// Report the wire protocol this build serves and the typed features it has.
+    Capabilities,
+}
+
+/// Decode an optional field so a *present* JSON null becomes
+/// `Some(JsonValue::Null)`.
+///
+/// The derived `Option` decoding folds `"input": null` and an absent `input`
+/// into the same `None`, but a pipeline seed distinguishes them: null is the
+/// `Null` value, absence means "start from the first step".
+fn deserialize_present_option<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<JsonValue>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    JsonValue::deserialize(deserializer).map(Some)
 }
 
 /// A single step in a pipeline
@@ -90,7 +127,10 @@ pub struct PipelineStep {
     /// Optional field selector (e.g., "name" to extract .name from results)
     #[serde(default)]
     pub select: Option<String>,
-    /// Optional predicate for filtering (simplified expression)
+    /// Optional predicate for filtering. When present it replaces `args`, and
+    /// is one of: a field-comparison shorthand (`size > 2`), the same written
+    /// against the element (`x.size > 2`, `.size > 2`), or a whole
+    /// `fn(x) => …` expression.
     #[serde(default)]
     pub predicate: Option<String>,
 }
@@ -342,6 +382,39 @@ fn dispatch_request(request: &AgentRequest) -> AgentResponse {
         AgentRequest::ListBuiltins { category } => list_builtins(category.as_deref()),
         AgentRequest::Schema { format } => get_schema(format),
         AgentRequest::TypeInfo { type_name } => get_type_info(type_name.as_deref()),
+        AgentRequest::Capabilities => capabilities(),
+    }
+}
+
+/// The wire name of this protocol, reported by [`AgentRequest::Capabilities`].
+const AGENT_API_PROTOCOL: &str = "aethershell-agent-api";
+
+/// The version of this protocol. A caller that needs the typed argument and
+/// pipeline contracts reads the matching `features` flags rather than inferring
+/// them from this number.
+const AGENT_API_PROTOCOL_VERSION: u32 = 1;
+
+/// Report the protocol and the typed features this build serves.
+///
+/// This is a pure, side-effect-free answer: a caller probes it before sending
+/// the value shapes an older build would have rejected. Every flag is exact —
+/// a caller turns on a behavior only when the flag it names is present and
+/// `true`.
+fn capabilities() -> AgentResponse {
+    AgentResponse {
+        success: true,
+        result: Some(json!({
+            "protocol": AGENT_API_PROTOCOL,
+            "protocol_version": AGENT_API_PROTOCOL_VERSION,
+            "features": {
+                "typed_arguments_v1": true,
+                "typed_pipeline_input_v1": true,
+                "explicit_null_pipeline_input_v1": true,
+            },
+        })),
+        error: None,
+        result_type: Some("Capabilities".to_string()),
+        metadata: None,
     }
 }
 
@@ -373,71 +446,127 @@ fn annotate_token_accounting(request: &AgentRequest, resp: &mut AgentResponse) {
     });
 }
 
-/// Execute a single builtin call
+/// The `structured_data` marker every typed (`call`/`pipeline`) envelope
+/// carries, so a caller can tell one from a legacy source-generated exchange.
+const TYPED_DATA_VERSION: &str = "typed-v1";
+
+/// Execute a single builtin call.
+///
+/// The JSON arguments become native values and go through the one dispatcher
+/// every other call uses, so effect policy, signature validation, journaling and
+/// the safety gate all still apply. No source text is built from the request,
+/// which is what makes `${…}`, quotes, newlines and record keys inert.
 fn execute_call(builtin: &str, args: &JsonValue) -> AgentResponse {
-    // Convert JSON args to AetherShell code
-    let code = match args_to_code(builtin, args) {
-        Ok(c) => c,
-        Err(e) => {
-            return AgentResponse {
-                success: false,
-                result: None,
-                error: Some(format!("Failed to convert arguments: {}", e)),
-                result_type: None,
-                metadata: None,
+    let mut env = crate::modules::env_with_modules();
+    match call_args(builtin, args) {
+        Ok(arg_values) => {
+            match crate::builtins::call_with_input(builtin, arg_values, None, &mut env) {
+                Ok(value) => value_response(value, typed_metadata("call", Some(builtin))),
+                Err(e) => typed_failure("call", Some(builtin), &e),
             }
         }
-    };
-
-    execute_eval(&code)
+        Err(e) => typed_failure("call", Some(builtin), &e),
+    }
 }
 
-/// Execute a pipeline of operations
+/// One pipeline step with everything its description decides already decided:
+/// the arguments the builtin will receive, and the validated selection to apply
+/// to what it returns.
+struct PreparedStep<'a> {
+    step: &'a PipelineStep,
+    args: Vec<Value>,
+    select: Option<Vec<&'a str>>,
+}
+
+/// Execute a pipeline of operations.
+///
+/// The seed is a native value: `Some(Value::Null)` when the request carried an
+/// explicit JSON null, `None` when it carried no `input` field at all. Each step
+/// receives the previous result as piped input, and a step's `predicate`
+/// replaces that step's arguments because it *is* the lambda the builtin takes.
+///
+/// Not the whole description is decided here, only what the request states:
+/// every step's parameters, predicate syntax and `select` path are converted and
+/// validated before any builtin runs, so a request that is malformed in one step
+/// cannot have produced effects in an earlier one. Whether a builtin accepts
+/// those values, and whether policy allows the call, is decided at dispatch — a
+/// runtime failure leaves the steps before it having run, as any sequence of
+/// calls does.
 fn execute_pipeline(steps: &[PipelineStep], input: Option<&JsonValue>) -> AgentResponse {
     if steps.is_empty() {
-        return AgentResponse {
-            success: false,
-            result: None,
-            error: Some("Pipeline must have at least one step".to_string()),
-            result_type: None,
-            metadata: None,
-        };
+        return typed_failure(
+            "pipeline",
+            None,
+            &crate::safety::bad_arg("pipeline", "at least one step", "no steps"),
+        );
     }
 
-    // Build the pipeline code
-    let mut code_parts = Vec::new();
+    let mut env = crate::modules::env_with_modules();
 
-    // Handle initial input if provided
-    if let Some(input_val) = input {
-        code_parts.push(json_to_ae_literal(input_val));
-    }
-
+    // Phase one: the description. Nothing here dispatches a builtin.
+    let seed = match input {
+        Some(value) => match json_to_value("pipeline", value) {
+            Ok(value) => Some(value),
+            Err(e) => return typed_failure("pipeline", None, &e),
+        },
+        None => None,
+    };
+    let mut prepared: Vec<PreparedStep<'_>> = Vec::with_capacity(steps.len());
     for step in steps {
-        let step_code = match build_step_code(step) {
-            Ok(c) => c,
-            Err(e) => {
-                return AgentResponse {
-                    success: false,
-                    result: None,
-                    error: Some(format!("Failed to build step '{}': {}", step.builtin, e)),
-                    result_type: None,
-                    metadata: None,
-                }
-            }
+        // A predicate *is* the lambda the builtin takes, so `args` is not the
+        // call's argument list and is not converted.
+        let args = match &step.predicate {
+            Some(predicate) => match predicate_lambda(&step.builtin, predicate, &mut env) {
+                Ok(lambda) => vec![lambda],
+                Err(e) => return typed_failure("pipeline", Some(step.builtin.as_str()), &e),
+            },
+            None => match call_args(&step.builtin, &step.args) {
+                Ok(values) => values,
+                Err(e) => return typed_failure("pipeline", Some(step.builtin.as_str()), &e),
+            },
         };
-
-        if code_parts.is_empty() {
-            code_parts.push(step_code);
-        } else {
-            code_parts.push(format!("| {}", step_code));
-        }
+        let select = match &step.select {
+            Some(path) => match select_segments(path) {
+                Ok(segments) => Some(segments),
+                Err(e) => return typed_failure("pipeline", Some(step.builtin.as_str()), &e),
+            },
+            None => None,
+        };
+        prepared.push(PreparedStep { step, args, select });
     }
 
-    let code = code_parts.join(" ");
-    execute_eval(&code)
+    // Phase two: dispatch. A failure here is that step's own runtime failure,
+    // and the steps before it have run: a pipeline is a sequence of calls, not
+    // a transaction.
+    let mut current = seed;
+    for PreparedStep { step, args, select } in prepared {
+        let produced =
+            match crate::builtins::call_with_input(&step.builtin, args, current.take(), &mut env) {
+                Ok(value) => value,
+                Err(e) => return typed_failure("pipeline", Some(step.builtin.as_str()), &e),
+            };
+
+        current = Some(match &select {
+            Some(segments) => match select_path(produced, segments) {
+                Ok(value) => value,
+                Err(e) => return typed_failure("pipeline", Some(step.builtin.as_str()), &e),
+            },
+            None => produced,
+        });
+    }
+
+    match current {
+        Some(value) => value_response(value, typed_metadata("pipeline", None)),
+        // Unreachable: `steps` is non-empty, so the loop always set a value.
+        None => typed_failure(
+            "pipeline",
+            None,
+            &crate::safety::bad_arg("pipeline", "at least one step", "no steps"),
+        ),
+    }
 }
 
-/// Execute raw AetherShell code
+/// Execute raw AetherShell code (the deliberate escape hatch).
 fn execute_eval(code: &str) -> AgentResponse {
     // Arbitrary source: the module namespaces must be bound, or every
     // `file.read(…)`/`sys.hostname()` in it fails as a field access on Null.
@@ -445,59 +574,95 @@ fn execute_eval(code: &str) -> AgentResponse {
 
     match parse_program(code) {
         Ok(stmts) => match eval_program(&stmts, &mut env) {
-            Ok(value) => {
-                let result_type = value_type_name(&value);
-                // Agent mode mirrors the CLI default: tabular results (Array/Table,
-                // where keys would otherwise repeat per row) are returned as compact
-                // AECON text instead of verbose JSON, paged to AE_TOKEN_BUDGET when
-                // set. Scalars/records/strings stay native JSON (a bare number must
-                // not become a quoted string). Non-agent consumers are unchanged.
-                if crate::safety::current_mode() == crate::safety::Mode::Agent
-                    && matches!(value, Value::Array(_) | Value::Table(_))
-                {
-                    let budget = std::env::var("AE_TOKEN_BUDGET")
-                        .ok()
-                        .and_then(|s| s.parse::<usize>().ok())
-                        .filter(|m| *m > 0);
-                    if let Some(text) = crate::builtins::render_agent(&value, budget) {
-                        return AgentResponse {
-                            success: true,
-                            result: Some(JsonValue::String(text)),
-                            error: None,
-                            result_type: Some("aecon".to_string()),
-                            metadata: Some(json!({ "code_executed": code, "render": "aecon" })),
-                        };
-                    }
-                }
-                AgentResponse {
-                    success: true,
-                    result: Some(value_to_json(&value)),
-                    error: None,
-                    result_type: Some(result_type),
-                    metadata: Some(json!({
-                        "code_executed": code
-                    })),
-                }
-            }
-            Err(e) => AgentResponse {
-                success: false,
-                result: None,
-                error: Some(format!("{}", e)),
-                result_type: None,
-                metadata: Some(json!({
-                    "code_attempted": code
-                })),
-            },
+            Ok(value) => value_response(value, json!({ "code_executed": code })),
+            Err(e) => error_response(format!("{}", e), json!({ "code_attempted": code })),
         },
-        Err(e) => AgentResponse {
-            success: false,
-            result: None,
-            error: Some(format!("Parse error: {}", e)),
-            result_type: None,
-            metadata: Some(json!({
-                "code_attempted": code
-            })),
-        },
+        Err(e) => error_response(
+            format!("Parse error: {}", e),
+            json!({ "code_attempted": code }),
+        ),
+    }
+}
+
+/// Render one evaluated value as a response.
+///
+/// Agent mode mirrors the CLI default: tabular results (Array/Table, where keys
+/// would otherwise repeat per row) are returned as compact AECON text instead of
+/// verbose JSON, paged to `AE_TOKEN_BUDGET` when set. Scalars/records/strings
+/// stay native JSON (a bare number must not become a quoted string). `metadata`
+/// is the response's transport metadata and gains `render: "aecon"` when that
+/// rendering applied.
+fn value_response(value: Value, mut metadata: JsonValue) -> AgentResponse {
+    let result_type = value_type_name(&value);
+    if crate::safety::current_mode() == crate::safety::Mode::Agent
+        && matches!(value, Value::Array(_) | Value::Table(_))
+    {
+        let budget = std::env::var("AE_TOKEN_BUDGET")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|m| *m > 0);
+        if let Some(text) = crate::builtins::render_agent(&value, budget) {
+            insert_metadata(&mut metadata, "render", json!("aecon"));
+            return AgentResponse {
+                success: true,
+                result: Some(JsonValue::String(text)),
+                error: None,
+                result_type: Some("aecon".to_string()),
+                metadata: Some(metadata),
+            };
+        }
+    }
+    AgentResponse {
+        success: true,
+        result: Some(value_to_json(&value)),
+        error: None,
+        result_type: Some(result_type),
+        metadata: Some(metadata),
+    }
+}
+
+/// A failure envelope carrying `error` text and transport metadata.
+fn error_response(error: String, metadata: JsonValue) -> AgentResponse {
+    AgentResponse {
+        success: false,
+        result: None,
+        error: Some(error),
+        result_type: None,
+        metadata: Some(metadata),
+    }
+}
+
+/// Transport metadata for one typed exchange.
+fn typed_metadata(action: &str, builtin: Option<&str>) -> JsonValue {
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "structured_data".to_string(),
+        JsonValue::String(TYPED_DATA_VERSION.to_string()),
+    );
+    metadata.insert("action".to_string(), JsonValue::String(action.to_string()));
+    if let Some(name) = builtin {
+        metadata.insert("builtin".to_string(), JsonValue::String(name.to_string()));
+    }
+    JsonValue::Object(metadata)
+}
+
+/// A typed failure: the coded error text, plus the code the failure carries.
+///
+/// The `error` string is the structured [`crate::safety::SafetyError`] form, so
+/// a caller reads `code`, `hint` and `did_you_mean` from it; the same code is
+/// repeated in `metadata` for consumers that only keep the envelope's shape.
+fn typed_failure(action: &str, builtin: Option<&str>, error: &anyhow::Error) -> AgentResponse {
+    let mut metadata = typed_metadata(action, builtin);
+    if let Some(failure) = error.downcast_ref::<crate::safety::SafetyError>() {
+        insert_metadata(&mut metadata, "code", json!(failure.code.as_str()));
+    }
+    error_response(format!("{}", error), metadata)
+}
+
+/// Insert one field into an object-valued metadata document.
+fn insert_metadata(metadata: &mut JsonValue, key: &str, value: JsonValue) {
+    if let JsonValue::Object(fields) = metadata {
+        fields.insert(key.to_string(), value);
     }
 }
 
@@ -666,84 +831,270 @@ fn get_type_info(type_name: Option<&str>) -> AgentResponse {
 // Helper Functions
 // ============================================================================
 
-/// Convert JSON arguments to AetherShell code
-fn args_to_code(builtin: &str, args: &JsonValue) -> Result<String> {
+/// The three keys the pre-typed API accepted as a named argument. One is read
+/// as a name only when it is the object's *only* field.
+const LEGACY_NAMED_ARGS: [&str; 3] = ["input", "value", "path"];
+
+/// Convert a request's `args` into the positional vector the dispatcher takes.
+///
+/// `null` (which an omitted `args` field decodes to) and `{}` both mean "no
+/// arguments", because that is what the pre-typed API meant by them. An object
+/// naming none of the three historical keys is passed through as **one**
+/// `Record` argument, so no field is silently dropped; an object mixing one of
+/// them with other fields is ambiguous and refused, because reading it either
+/// way would discard data.
+fn call_args(builtin: &str, args: &JsonValue) -> Result<Vec<Value>> {
     match args {
-        JsonValue::Null => Ok(format!("{}()", builtin)),
-        JsonValue::Array(arr) => {
-            let arg_strs: Vec<String> = arr.iter().map(json_to_ae_literal).collect();
-            Ok(format!("{}({})", builtin, arg_strs.join(", ")))
-        }
-        JsonValue::Object(obj) => {
-            // Named arguments - convert to positional based on builtin signature
-            // For now, if there's a single "input" or "value" key, use it directly
-            if let Some(val) = obj.get("input").or(obj.get("value")).or(obj.get("path")) {
-                Ok(format!("{}({})", builtin, json_to_ae_literal(val)))
-            } else if obj.is_empty() {
-                Ok(format!("{}()", builtin))
-            } else {
-                // Convert object to record argument
-                Ok(format!("{}({})", builtin, json_to_ae_literal(args)))
+        JsonValue::Null => Ok(Vec::new()),
+        JsonValue::Array(items) => items
+            .iter()
+            .map(|item| json_to_value(builtin, item))
+            .collect(),
+        JsonValue::Object(fields) => {
+            if fields.is_empty() {
+                return Ok(Vec::new());
             }
+            let named: Vec<&String> = fields
+                .keys()
+                .filter(|key| LEGACY_NAMED_ARGS.contains(&key.as_str()))
+                .collect();
+            if fields.len() == 1 && named.len() == 1 {
+                let value = fields
+                    .get(named[0])
+                    .expect("the key was just read from this map");
+                return Ok(vec![json_to_value(builtin, value)?]);
+            }
+            if !named.is_empty() {
+                return Err(crate::safety::bad_arg(
+                    builtin,
+                    "a positional argument array; to pass one Record, put it in the array (args: [{…}])",
+                    &format!(
+                        "an object with the named field `{}` alongside {} other field(s)",
+                        named[0],
+                        fields.len() - 1
+                    ),
+                ));
+            }
+            Ok(vec![json_to_value(builtin, args)?])
         }
-        _ => Ok(format!("{}({})", builtin, json_to_ae_literal(args))),
+        scalar => Ok(vec![json_to_value(builtin, scalar)?]),
     }
 }
 
-/// Build code for a single pipeline step
-fn build_step_code(step: &PipelineStep) -> Result<String> {
-    let mut code = args_to_code(&step.builtin, &step.args)?;
-
-    // Handle predicate (for where/filter operations)
-    if let Some(pred) = &step.predicate {
-        // Parse simple predicates like "size > 1000"
-        let lambda = predicate_to_lambda(pred);
-        code = format!("{}({})", step.builtin, lambda);
+/// Convert one JSON value to its native counterpart.
+fn json_to_value(builtin: &str, value: &JsonValue) -> Result<Value> {
+    match value {
+        JsonValue::Null => Ok(Value::Null),
+        JsonValue::Bool(b) => Ok(Value::Bool(*b)),
+        JsonValue::Number(number) => json_number_to_value(builtin, number),
+        JsonValue::String(s) => Ok(Value::Str(s.clone())),
+        JsonValue::Array(items) => {
+            let mut converted = Vec::with_capacity(items.len());
+            for item in items {
+                converted.push(json_to_value(builtin, item)?);
+            }
+            Ok(Value::Array(converted))
+        }
+        JsonValue::Object(fields) => {
+            let mut record = BTreeMap::new();
+            for (key, item) in fields {
+                record.insert(key.clone(), json_to_value(builtin, item)?);
+            }
+            Ok(Value::Record(record))
+        }
     }
-
-    // Handle field selection
-    if let Some(field) = &step.select {
-        code = format!("{} | map(fn(x) => x.{})", code, field);
-    }
-
-    Ok(code)
 }
 
-/// Convert a simple predicate to a lambda
+/// Convert one JSON number, refusing the ones the native value space cannot
+/// hold exactly.
+///
+/// Native integers are 64-bit signed and native floats 64-bit, so a JSON integer
+/// above `i64::MAX` has no exact native form. Deriving an `f64` from it would
+/// round it, so it is refused instead of silently altered.
+fn json_number_to_value(builtin: &str, number: &serde_json::Number) -> Result<Value> {
+    if let Some(int) = number.as_i64() {
+        return Ok(Value::Int(int));
+    }
+    let expected = "a number representable as a 64-bit signed integer or a 64-bit float";
+    if let Some(unsigned) = number.as_u64() {
+        return Err(crate::safety::bad_arg(
+            builtin,
+            expected,
+            &format!("the integer {unsigned}, which is above i64::MAX"),
+        ));
+    }
+    match number.as_f64() {
+        Some(float) => Ok(Value::Float(float)),
+        None => Err(crate::safety::bad_arg(
+            builtin,
+            expected,
+            &format!("the number {number}"),
+        )),
+    }
+}
+
+/// Build the lambda a step's `predicate` names.
+///
+/// The predicate is deliberately AetherShell source — the one request field
+/// that is an expression rather than data — and it is evaluated on its own
+/// instead of being pasted into a generated program. [`predicate_to_lambda`]
+/// decides which of the accepted spellings it is.
+///
+/// Construction is free of effects: the program must be exactly one lambda
+/// expression, and only the lambda literal is evaluated. Its *body* is not run
+/// here — it runs when the step dispatches.
+fn predicate_lambda(builtin: &str, predicate: &str, env: &mut Env) -> Result<Value> {
+    let source = predicate_to_lambda(predicate);
+    let program = parse_program(&source).map_err(|e| {
+        crate::safety::bad_arg(
+            builtin,
+            "a predicate that parses as one expression",
+            &format!("a parse error: {e}"),
+        )
+    })?;
+    // Anything else is refused before it is evaluated: a program such as
+    // `fn(x) => true` followed by a write and another lambda would run that
+    // write while the request was still being described, and would still answer
+    // with a lambda, so the write would go unnoticed.
+    if !matches!(program.as_slice(), [Stmt::Expr(Expr::Lambda { .. })]) {
+        return Err(crate::safety::bad_arg(
+            builtin,
+            "a predicate that is one lambda expression",
+            &format!("a program of {} statement(s)", program.len()),
+        ));
+    }
+    match eval_program(&program, env) {
+        Ok(Value::Lambda(lambda)) => Ok(Value::Lambda(lambda)),
+        Ok(other) => Err(crate::safety::bad_arg(
+            builtin,
+            "a predicate that evaluates to a lambda",
+            other.type_name(),
+        )),
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether `source` already begins with the element name `x` as a whole
+/// identifier, so the field shorthand's `x.` prefix must not be added again.
+fn is_rooted_at_x(source: &str) -> bool {
+    let mut chars = source.chars();
+    if chars.next() != Some('x') {
+        return false;
+    }
+    !matches!(chars.next(), Some(c) if c.is_alphanumeric() || c == '_')
+}
+
+/// Convert a simple predicate to the lambda the step's builtin is called with.
+///
+/// Accepted spellings, in the order they are recognized:
+///
+/// - a whole lambda (`fn(e) => e.n > 1`), passed through untouched;
+/// - an expression already rooted at the element (`x > 2`, `x.size > 2`),
+///   wrapped as `fn(x) => <expression>`;
+/// - a leading dot naming a field (`.size > 2`), wrapped as `fn(x) => x.size > 2`;
+/// - the field-comparison shorthand (`size > 2`), wrapped as `fn(x) => x.size > 2`;
+/// - anything else, wrapped as `fn(x) => <expression>`.
+///
+/// The shorthand is tried first for an unqualified name only: prefixing an
+/// expression that already names the element produced `x.x` and failed to
+/// parse, so `x > 2` over an array of numbers could not work at all. A record
+/// field that really is named `x` stays reachable as `x.x`. A general
+/// expression that merely *mentions* `x`, such as `len(x) > 2`, is not
+/// recognized and still takes the shorthand path.
 fn predicate_to_lambda(predicate: &str) -> String {
-    // Handle common patterns
+    let predicate = predicate.trim();
+    if predicate.starts_with("fn(") || predicate.starts_with("fn ") {
+        return predicate.to_string();
+    }
+    if is_rooted_at_x(predicate) {
+        return format!("fn(x) => {}", predicate);
+    }
+    if predicate.starts_with('.') {
+        return format!("fn(x) => x{}", predicate);
+    }
     if predicate.contains(">")
         || predicate.contains("<")
         || predicate.contains("==")
         || predicate.contains("!=")
     {
         format!("fn(x) => x.{}", predicate)
-    } else if predicate.starts_with('.') {
-        format!("fn(x) => x{}", predicate)
     } else {
         format!("fn(x) => {}", predicate)
     }
 }
 
-/// Convert JSON value to AetherShell literal syntax
-fn json_to_ae_literal(val: &JsonValue) -> String {
-    match val {
-        JsonValue::Null => "None".to_string(),
-        JsonValue::Bool(b) => if *b { "true" } else { "false" }.to_string(),
-        JsonValue::Number(n) => n.to_string(),
-        JsonValue::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
-        JsonValue::Array(arr) => {
-            let items: Vec<String> = arr.iter().map(json_to_ae_literal).collect();
-            format!("[{}]", items.join(", "))
-        }
-        JsonValue::Object(obj) => {
-            let fields: Vec<String> = obj
-                .iter()
-                .map(|(k, v)| format!("{}: {}", k, json_to_ae_literal(v)))
-                .collect();
-            format!("{{{}}}", fields.join(", "))
-        }
+/// Validate one `select` path and split it into its literal dot-separated keys.
+///
+/// Pure: this is the half that decides whether the *description* is usable, so
+/// it runs before any step has been dispatched.
+fn select_segments(path: &str) -> Result<Vec<&str>> {
+    let segments: Vec<&str> = path.split('.').collect();
+    if segments.iter().any(|segment| segment.is_empty()) {
+        return Err(crate::safety::bad_arg(
+            "select",
+            "a field path with no empty segment",
+            &format!("{path:?}"),
+        ));
     }
+    Ok(segments)
+}
+
+/// Project already-validated `select` segments out of every element of a step's
+/// array result.
+///
+/// `select` names data, never source: each segment is a literal record key, so a
+/// key the language could not spell as a field access (`a-b`, a Unicode name, a
+/// reserved word) still reads correctly. The result is an `Array`, because that
+/// is what the historical `map(fn(x) => x.<path>)` produced, and a non-array
+/// subject is refused the way `map` refused it.
+fn select_path(value: Value, segments: &[&str]) -> Result<Value> {
+    match value {
+        Value::Array(items) => {
+            let mut projected = Vec::with_capacity(items.len());
+            for item in items {
+                projected.push(project_path(item, segments)?);
+            }
+            Ok(Value::Array(projected))
+        }
+        other => Err(crate::safety::bad_arg("map", "an array", other.type_name())),
+    }
+}
+
+/// Read one dot-separated path of literal record keys out of a value.
+fn project_path(value: Value, segments: &[&str]) -> Result<Value> {
+    let mut current = value;
+    for segment in segments {
+        current = match current {
+            Value::Record(mut fields) => match fields.remove(*segment) {
+                Some(found) => found,
+                None => {
+                    return Err(crate::safety::unknown_field(
+                        segment,
+                        crate::builtins::nearest_names(segment, fields.keys().map(|k| k.as_str())),
+                    ))
+                }
+            },
+            other => {
+                return Err(crate::safety::bad_arg(
+                    &select_display(segments),
+                    "a Record (or a module)",
+                    other.type_name(),
+                ))
+            }
+        };
+    }
+    Ok(current)
+}
+
+/// A validated `select` path as the field access it stands for, for a failure
+/// that has to name what it could not read.
+fn select_display(segments: &[&str]) -> String {
+    let mut rendered = String::from("x");
+    for segment in segments {
+        rendered.push('.');
+        rendered.push_str(segment);
+    }
+    rendered
 }
 
 /// Convert AetherShell Value to JSON
@@ -4304,6 +4655,8 @@ pub mod server {
         )
         .unwrap_or_default();
 
+        // Read the seed from the raw body rather than through `AgentRequest`, so
+        // a present `"input": null` stays distinguishable from an absent one.
         let input = body.get("input").cloned();
 
         run_blocking(AgentRequest::Pipeline { steps, input }, eval_deadline()).await

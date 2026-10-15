@@ -231,13 +231,19 @@ values { x: 1, y: 2, z: 3 }   # [1, 2, 3]
 ## Size
 
 ### `len` / `length`
-Return the number of elements in an array, characters in a string, or keys in a record.
+Return the number of UTF-8 bytes in a string, elements in an array, or fields in a record.
 
 ```aethershell
 len [1, 2, 3]       # 3
 len "hello"          # 5
+len "你好"           # 6 (three bytes each)
 len { a: 1, b: 2 }  # 2
 ```
+
+A string is counted in bytes, not characters: `"你好"` is six bytes and `"😀"` is four.
+That is the same count `str.len` returns, and the count token and content consumers
+size their buffers from. `char_len` counts Unicode scalar values and `byte_len` names
+the byte count explicitly — see [String Operations](./strings.md#length).
 
 ## Membership
 

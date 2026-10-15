@@ -397,8 +397,57 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Any),
         params: &[],
         returns: "Int",
-        doc: "Number of elements in an array, characters in a string, or fields in a record.",
-        examples: &[("[1, 2, 3] | len", "3"), (r#""abc" | len"#, "3")],
+        // Not "characters". `bi_len` has always measured `String::len`, which is
+        // UTF-8 bytes, and every existing token and content consumer counts on
+        // that: `len("你好")` is 6, not 2. `char_len` is the explicit
+        // scalar-value count the description used to promise.
+        doc: "UTF-8 bytes in a string, elements in an array, or fields in a record. A string is counted in bytes, not characters: \"你好\" is 6 and \"😀\" is 4. Use char_len for Unicode scalar values.",
+        examples: &[
+            ("[1, 2, 3] | len", "3"),
+            (r#""abc" | len"#, "3"),
+            (r#""你好" | len"#, "6"),
+            ("len(\"😀\")", "4"),
+        ],
+    },
+    Signature {
+        // A string length in Unicode scalar values, which is a different
+        // question from `len`'s byte count and from grapheme clusters: the
+        // language has no segmentation, so a ZWJ sequence counts every scalar
+        // it is written from. The name is `char_len` because that is what Rust
+        // counts; it collides with no existing builtin, and no alias is
+        // declared because no consumer has ever spelled it otherwise.
+        name: "char_len",
+        category: Some("String"),
+        subject_required: false,
+        aliases: &[],
+        subject: Some(Ty::Str),
+        params: &[],
+        returns: "Int",
+        doc: "Unicode scalar values in a string: `chars().count()`, not bytes and not grapheme clusters. \"e\u{301}\" (e plus a combining acute) is 2 here, and a ZWJ emoji sequence is every scalar it is written from rather than the one glyph a UI draws.",
+        examples: &[
+            (r#""你好" | char_len"#, "2"),
+            ("char_len(\"😀\")", "1"),
+            ("char_len(\"e\u{301}\")", "2"),
+            ("char_len(\"👨‍👩‍👧\")", "5"),
+        ],
+    },
+    Signature {
+        // The byte half of the same pair. `len` and `byte_len` agree on a
+        // string; this exists so a caller can say which measure it wants
+        // without relying on `len`'s documented history.
+        name: "byte_len",
+        category: Some("String"),
+        subject_required: false,
+        aliases: &[],
+        subject: Some(Ty::Str),
+        params: &[],
+        returns: "Int",
+        doc: "UTF-8 bytes in a string, the same count `len` gives a string. \"你好\" is 6 bytes, \"😀\" is 4, and \"e\u{301}\" is 3.",
+        examples: &[
+            ("byte_len(\"你好\")", "6"),
+            ("byte_len(\"😀\")", "4"),
+            ("byte_len(\"e\u{301}\")", "3"),
+        ],
     },
     // ── the E1 corpus's working set ─────────────────────────────────────
     //
@@ -5811,6 +5860,56 @@ pub static SIGNATURES: &[Signature] = &[
         examples: &[
             (r#"strings("tests/fixtures/sample.db") | take(1)"#, r#"["SQLite format 3"]"#),
             (r#"(strings("tests/fixtures/sample.db", 8) | len) > 0"#, r#"true"#),
+        ],
+    },
+    // The two declarations below exist because their catalogue entries were
+    // derived from their names: `proc_spawn` was advertised as an empty
+    // `proc_spawn() -> Value`, and `file_patch` as a zero-parameter
+    // `file_patch() -> Value`, while both bodies read positional arguments.
+    //
+    // Neither example starts a process or writes a file. Both are negative
+    // validation demonstrations: `validate` refuses a non-String where a
+    // String is declared, before `call_with_input_inner` reaches
+    // `guard_dispatch`, so the catch is the whole call. The *doc* carries the
+    // valid shape, because a runnable example here would either spawn a
+    // process or edit the working tree, and `tests/declared_signatures.rs`
+    // executes every declared example on every machine.
+    Signature {
+        name: "proc_spawn",
+        category: None,
+        subject_required: false,
+        aliases: &[],
+        subject: None,
+        params: &[
+            req("program", Ty::Str, "the executable to start"),
+            opt_rest("args", Ty::Str, "arguments passed to it verbatim"),
+        ],
+        returns: "Int",
+        doc: "Start `program` with `args` directly, with no shell interpolation, and return the child's pid: `proc_spawn(\"git\", \"status\")`. It grants the same capability as `sh`, so the effect policy gates the call; the program is required and every argument must be a String. The example here is the refusal a non-String program gets and starts nothing.",
+        examples: &[(r#"try { proc_spawn(123) } catch e { e.error.code }"#, "E_BAD_ARG")],
+    },
+    Signature {
+        name: "file_patch",
+        category: None,
+        subject_required: false,
+        aliases: &[],
+        subject: None,
+        params: &[
+            req("path", Ty::Str, "the file to edit in place"),
+            opt(
+                "patches",
+                Ty::Any,
+                "one {find, replace} record or an array of patch records; omit to take the patches from the pipeline",
+            ),
+        ],
+        returns: "Record",
+        doc: "Apply find/replace records to `path` and write it back, returning {path, applied, failed, success, patches_applied, patches_failed}: `file_patch(\"config.txt\", [{find: \"DEBUG=0\", replace: \"DEBUG=1\"}])`. The patches are one {find, replace} record or an array of them, passed positionally or piped; a record may use old/search and new/with instead of find/replace. The examples here show the one-argument and two-argument call shapes and both stop at validation, so neither writes anything.",
+        examples: &[
+            (r#"try { file_patch(123) } catch e { e.error.code }"#, "E_BAD_ARG"),
+            (
+                r#"try { file_patch(123, [{find: "a", replace: "b"}]) } catch e { e.error.code }"#,
+                "E_BAD_ARG",
+            ),
         ],
     },
 ];

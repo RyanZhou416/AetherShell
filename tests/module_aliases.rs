@@ -33,11 +33,10 @@ use aethershell::value::Value;
 ///
 /// Dispatch has two layers: `BUILTIN_LOOKUP` maps a name to an index into a
 /// function-pointer table, and a trailing `match` handles the rest. Only the
-/// first is public, so these three resolve at runtime yet look missing to any
-/// consumer that enumerates `BUILTIN_LOOKUP` — including `agent_api`'s dynamic
-/// discovery, whose whole purpose is telling an agent what it may call. Worth
+/// first is public, so a module alias whose target lives in the second looks
+/// missing to any consumer that enumerates `BUILTIN_LOOKUP` alone. Worth
 /// unifying; until then, they are dispatchable and must not fail this test.
-const DISPATCHABLE_OUTSIDE_LOOKUP: &[&str] = &["agent", "ai", "swarm"];
+const DISPATCHABLE_OUTSIDE_LOOKUP: &[&str] = &["agent", "ai", "swarm", "byte_len", "char_len"];
 
 /// Builtin names referenced by a module alias that no builtin implements.
 ///

@@ -150,6 +150,7 @@ buildah_build	Exec
 buildah_images	ReadLocal
 bun_install	Exec
 bun_run	Exec
+byte_len	Pure
 bzip2_compress	WriteLocal
 bzip2_decompress	WriteLocal
 cache_ai	Pure
@@ -165,6 +166,7 @@ cargo_test_cmd	Exec
 cat	ReadLocal
 cd	WriteLocal
 ceil	Pure
+char_len	Pure
 check_compliance	Pure
 check_permission	Pure
 chgrp	WriteLocal
