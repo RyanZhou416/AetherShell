@@ -26,6 +26,8 @@
 
 use anyhow::{anyhow, Result};
 
+use super::literal;
+
 /// Transpile a whole Bash script (multi-line) to Aether code.
 /// Transpile a whole Bash script (multi-line) to Aether code.
 ///
@@ -513,10 +515,12 @@ fn render_arg_expr(tok: &Token) -> String {
             // transpiler's own unit tests caught it.
             let mut parts: Vec<String> = Vec::new();
             let mut literal = String::new();
-            let flush = |literal: &mut String, parts: &mut Vec<String>| {
-                if !literal.is_empty() {
-                    parts.push(format!("\"{}\"", escape_in_double_quotes(literal)));
-                    literal.clear();
+            let flush = |text: &mut String, parts: &mut Vec<String>| {
+                if !text.is_empty() {
+                    // Opaque text: the shared helper picks the spelling, and
+                    // keeps the evaluator from reading a hole in it.
+                    parts.push(literal::ae_source_string(text));
+                    text.clear();
                 }
             };
             for p in pcs {
@@ -690,53 +694,17 @@ fn single_quote_literal(s: &str) -> String {
     json_string_literal(s)
 }
 
+/// A string literal for generated source: a `sh([...])` element, a fallback
+/// `bash -lc` line, or an assignment RHS. The name is the JSON-style spelling
+/// this used to have; every caller builds AetherShell source, so
+/// [`literal::ae_source_string`] decides the spelling.
 fn json_string_literal(s: &str) -> String {
-    // Simple JSON string escaper for ASCII-oriented input.
-    let mut out = String::from("\"");
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c.is_control() => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+    literal::ae_source_string(s)
 }
 
+/// An AetherShell string literal with minimal escapes and *no* interpolation.
 fn double_quote_with_escapes(s: &str) -> String {
-    // Aether string literal with minimal escapes, *no* interpolation.
-    let mut out = String::from("\"");
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
-fn escape_in_double_quotes(s: &str) -> String {
-    let mut out = String::new();
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            _ => out.push(ch),
-        }
-    }
-    out
+    literal::ae_source_string(s)
 }
 
 /* =============================================================================

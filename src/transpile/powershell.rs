@@ -15,6 +15,8 @@
 
 use anyhow::Result;
 
+use super::literal;
+
 /// Transpile a whole PowerShell script (multi-line) to Aether code.
 /// Multi-line blocks (if/foreach/for/while/switch/try/function/class) are
 /// accumulated and emitted as a single `sh(["pwsh","-c","..."])` call rather
@@ -35,7 +37,7 @@ pub fn transpile_powershell_to_ae(src: &str) -> Result<String> {
         if in_multiline_string {
             if line == "\"@" || line == "'@" {
                 in_multiline_string = false;
-                out.push_str(&format!("\"{}\"", escape_string(&multiline_buffer)));
+                out.push_str(&literal::ae_source_string(&multiline_buffer));
                 out.push('\n');
                 multiline_buffer.clear();
             } else {
@@ -348,9 +350,9 @@ fn parse_ps_assignment(line: &str) -> Option<String> {
     } else {
         // Treat as bare string
         return Some(format!(
-            "let {} = \"{}\";",
+            "let {} = {};",
             var_part,
-            escape_string(val_part)
+            literal::ae_source_string(val_part)
         ));
     }
 
@@ -362,13 +364,15 @@ fn parse_simple_value(s: &str) -> String {
     if s.starts_with('"') && s.ends_with('"') {
         s.to_string()
     } else if s.starts_with('\'') && s.ends_with('\'') {
-        format!("\"{}\"", &s[1..s.len() - 1])
+        // A PowerShell single-quoted string is opaque, so the content is a
+        // literal rather than source the evaluator may rewrite.
+        literal::ae_source_string(&s[1..s.len() - 1])
     } else if s.starts_with('$') {
         s[1..].to_string()
     } else if is_ps_number(s) {
         s.to_string()
     } else {
-        format!("\"{}\"", escape_string(s))
+        literal::ae_source_string(s)
     }
 }
 
@@ -710,13 +714,13 @@ fn render_ps_args(args: &[Token]) -> String {
 
 fn render_token_expr(tok: &Token) -> String {
     match tok {
-        Token::Single(s) => format!("\"{}\"", escape_string(s)),
+        Token::Single(s) => literal::ae_source_string(s),
         Token::Parameter(p) => format!("\"-{}\"", p),
         Token::Splat(s) => s.clone(), // Pass as variable
         Token::Interp(pieces) => {
             if pieces.len() == 1 {
                 match &pieces[0] {
-                    Piece::Text(t) => format!("\"{}\"", escape_string(t)),
+                    Piece::Text(t) => literal::ae_source_string(t),
                     Piece::Var(v) => v.clone(),
                 }
             } else {
@@ -724,7 +728,7 @@ fn render_token_expr(tok: &Token) -> String {
                 let mut parts = Vec::new();
                 for piece in pieces {
                     match piece {
-                        Piece::Text(t) => parts.push(format!("\"{}\"", escape_string(t))),
+                        Piece::Text(t) => parts.push(literal::ae_source_string(t)),
                         Piece::Var(v) => parts.push(format!("str({})", v)),
                     }
                 }
@@ -975,38 +979,12 @@ fn is_ps_number(s: &str) -> bool {
     false
 }
 
-fn escape_string(s: &str) -> String {
-    let mut out = String::new();
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
+/// A string literal for generated source: an assignment RHS, a `sh([...])`
+/// element, or a fallback `pwsh -c` line. The name is the JSON-style spelling
+/// this used to have; every caller builds AetherShell source, so
+/// [`literal::ae_source_string`] decides the spelling.
 fn json_string_literal(s: &str) -> String {
-    let mut out = String::from("\"");
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c.is_control() => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+    literal::ae_source_string(s)
 }
 
 /* =============================================================================

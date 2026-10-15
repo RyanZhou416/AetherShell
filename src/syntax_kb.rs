@@ -230,6 +230,14 @@ AetherShell Syntax Reference
 TYPES:
   Int, Float, String, Bool, Array, Record, Lambda, Null, Uri, Table
 
+STRING LITERALS:
+  r"C:\temp\new"     # literal backslashes; no ${...} interpolation
+  Raw quote delimiters may use 0..16 matching hashes around the quotes.
+  Raw contents preserve quotes, whitespace, CRLF/LF and Unicode without normalization.
+  Double quotes allow only \\, \", \n, \r and \t escapes; unknown escapes fail.
+  Ordinary single quotes keep backslashes but still interpolate ${...}.
+  All quote forms must close; use raw strings for paths, regexes and templates.
+
 VARIABLES:
   let x = 5          # immutable
   mut counter = 0    # mutable
@@ -250,6 +258,7 @@ BUILTINS:
   range, flatten, reverse, slice, zip, push, concat
   abs, min, max, floor, ceil, round, sqrt, pow
   env, json_parse, json_stringify, time, sleep
+  proc_run(argv, {encoding: "utf-8"})  # explicit argv, strict text or bytes
 
 PATTERN MATCHING:
   match value {

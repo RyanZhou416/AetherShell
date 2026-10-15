@@ -248,7 +248,8 @@ try {
         @{ Id = 'A1'; Name = 'filter-map-typed-array'; Code = '[1, 2, 3, 4] | where(fn(x) => x > 2) | map(fn(x) => x * 10)'; Want = '[30,40]' },
         @{ Id = 'A2'; Name = 'sort-ascending'; Code = '[3, 1, 2] | sort'; Want = '[1,2,3]' },
         @{ Id = 'A3'; Name = 'sort-reverse-flag'; Code = '[3, 1, 2] | sort("-r")'; Want = '[3,2,1]' },
-        @{ Id = 'A4'; Name = 'json-null-roundtrip-nested'; Code = 'json_parse(json_stringify({a: None, nested: [None]}))'; Want = '{"a":null,"nested":[null]}' }
+        @{ Id = 'A4'; Name = 'json-null-roundtrip-nested'; Code = 'json_parse(json_stringify({a: None, nested: [None]}))'; Want = '{"a":null,"nested":[null]}' },
+        @{ Id = 'A7'; Name = 'raw-path-and-template'; Code = 'r"C:\temp\new ${1+2}"'; Want = '"C:\\temp\\new ${1+2}"' }
     )
     foreach ($expression in $expressions) {
         $run = Invoke-Ae -Arguments @('--deterministic', '-c', $expression.Code)
@@ -271,6 +272,13 @@ try {
         ((-not $comparator.TimedOut) -and ($comparator.ExitCode -ne 0) -and ($comparator.Err -match 'E_BAD_ARG')) "exit=$($comparator.ExitCode)"
 
     [Console]::Error.WriteLine('')
+    foreach ($invalid in @(
+        @{ Id = 'A8'; Name = 'unknown-escape-is-a-parse-error'; Code = '"\q"' },
+        @{ Id = 'A9'; Name = 'unclosed-string-is-a-parse-error'; Code = '"abc' }
+    )) {
+        $run = Invoke-Ae -Arguments @('--deterministic', '-c', $invalid.Code)
+        Add-Result $invalid.Id $invalid.Name ((-not $run.TimedOut) -and ($run.ExitCode -ne 0) -and ($run.Err -match 'E_PARSE')) "exit=$($run.ExitCode)"
+    }
     [Console]::Error.WriteLine('--- ae agent execute ---')
 
     $requests = @(
@@ -280,7 +288,8 @@ try {
         @{ Id = 'B4'; Name = 'typed-data-capabilities'; RequestText = '{"action":"capabilities"}'; Expected = '{"protocol":"aethershell-agent-api","protocol_version":1,"features":{"typed_arguments_v1":true,"typed_pipeline_input_v1":true,"explicit_null_pipeline_input_v1":true}}' },
         @{ Id = 'B5'; Name = 'typed-record-literals'; RequestText = '{"action":"call","builtin":"first","args":[[{"a-b":"literal ${1+2}","中文":null}]]}'; Expected = '{"a-b":"literal ${1+2}","中文":null}' },
         @{ Id = 'B6'; Name = 'typed-null-seed'; RequestText = '{"action":"pipeline","input":null,"steps":[{"builtin":"type_of"}]}'; Expected = '"Null"' },
-        @{ Id = 'B7'; Name = 'unicode-scalar-length'; RequestText = '{"action":"call","builtin":"char_len","args":["你好😀"]}'; Expected = '3' }
+        @{ Id = 'B7'; Name = 'unicode-scalar-length'; RequestText = '{"action":"call","builtin":"char_len","args":["你好😀"]}'; Expected = '3' },
+        @{ Id = 'B8'; Name = 'explicit-process-runner'; RequestText = (@{action='call'; builtin='proc_run'; args=@(,@($script:Exe, '--version'))} | ConvertTo-Json -Compress -Depth 5) }
     )
     foreach ($request in $requests) {
         $run = Invoke-Ae -Arguments @('agent', 'execute') -Stdin $request.RequestText
@@ -292,6 +301,13 @@ try {
             $matches = ($cap.protocol -ceq 'aethershell-agent-api') -and ($cap.protocol_version -eq 1) -and
                 ($cap.features.typed_arguments_v1 -ceq $true) -and ($cap.features.typed_pipeline_input_v1 -ceq $true) -and
                 ($cap.features.explicit_null_pipeline_input_v1 -ceq $true)
+        } elseif ($request.Id -eq 'B8' -and $null -ne $document) {
+            $captured = $document.result
+            $matches = ($captured.success -ceq $true) -and ($captured.process.exit_code -eq 0) -and
+                ($captured.process.cleanup_complete -ceq $true) -and ($captured.process.group_termination_requested -ceq $true) -and
+                ($captured.stdout.decoded -ceq $true) -and ($captured.stdout.complete -ceq $true) -and
+                ($captured.stdout.text.Trim() -ceq $version) -and
+                ($captured.stdout.base64 -ceq [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($captured.stdout.text)))
         } elseif ($request.ContainsKey('Expected') -and $null -ne $document) {
             $actual = ConvertTo-Json -InputObject $document.result -Compress -Depth 20
             $normalized = ConvertTo-Json -InputObject ($request.Expected | ConvertFrom-Json) -Compress -Depth 20
@@ -356,6 +372,11 @@ try {
         }
     }
 
+    $expectedIds = @('A1','A2','A3','A4','A5','A6','A7','A8','A9','B1','B2','B3','B4','B5','B6','B7','B8','S1','S2','S3','S4','S5','S6')
+    $actualIds = @($script:Checks | ForEach-Object { $_.id })
+    if ($actualIds.Count -ne $expectedIds.Count -or @(Compare-Object $expectedIds $actualIds).Count -ne 0) {
+        Add-Result 'Z0' 'all-required-checks-ran' $false "expected $($expectedIds.Count) checks; observed $($actualIds.Count)"
+    }
     $passed = @($script:Checks | Where-Object { $_.passed }).Count
     $failed = @($script:Checks | Where-Object { -not $_.passed }).Count
     $exitCode = if ($failed -eq 0) { 0 } else { 1 }

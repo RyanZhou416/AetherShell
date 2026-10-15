@@ -88,6 +88,11 @@ pub enum Expr {
     LitInt(i64),
     LitFloat(f64),
     LitStr(String),
+    /// A raw string literal (`r"..."`, `r#"..."#`): the content is exactly what
+    /// the source contained. Unlike [`Expr::LitStr`] it is never interpolated,
+    /// so `${...}` and backslashes in it reach the evaluator verbatim, and it
+    /// types as `String` rather than `Uri` whatever it looks like.
+    LitRawStr(String),
     LitBool(bool),
     Null,
 

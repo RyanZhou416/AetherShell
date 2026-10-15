@@ -39,6 +39,21 @@ impl ParseError {
                 .to_string(),
         }
     }
+
+    /// The same failure with guidance specific to what the lexer saw, for the
+    /// cases where "fix the syntax" is too vague to act on: an unknown escape
+    /// has one obvious repair, and a raw literal is how a Windows path or a
+    /// JSON blob is written. The "nothing ran" guarantee is kept in every hint,
+    /// so an agent reads the same promise from either constructor.
+    pub fn with_hint(message: impl Into<String>, guidance: &str) -> Self {
+        Self {
+            message: message.into(),
+            hint: format!(
+                "{}; the source never reached the evaluator, so nothing ran",
+                guidance
+            ),
+        }
+    }
 }
 
 impl std::fmt::Display for ParseError {
@@ -124,6 +139,9 @@ enum Tok {
     Throw, // throw keyword
     Ident,
     String,
+    /// A raw string literal: `r"..."` or `r#"..."#`. Its text is the literal
+    /// content, with no escape processing and no interpolation anywhere.
+    RawString,
     Int,
     Float,
     Attribute, // #[...] attribute
@@ -181,7 +199,10 @@ pub struct Parser {
 /// Parse a program, returning statements and any errors encountered.
 /// Uses error recovery to report multiple errors when possible.
 pub fn parse_program(src: &str) -> Result<Vec<Stmt>> {
-    let toks = lex(src).map_err(|e| ParseError::new(e.to_string()))?;
+    // `lex` owns its own diagnostics — an unknown escape and an unterminated
+    // literal each name a different repair — so its `ParseError` is carried
+    // through rather than re-wrapped.
+    let toks = lex(src)?;
     let mut p = Parser {
         toks,
         i: 0,
@@ -227,7 +248,7 @@ pub fn parse_program(src: &str) -> Result<Vec<Stmt>> {
 /// Parse a program without error recovery (stops at first error).
 /// Useful for cases where partial parsing is not desired.
 pub fn parse_program_strict(src: &str) -> Result<Vec<Stmt>> {
-    let toks = lex(src).map_err(|e| ParseError::new(e.to_string()))?;
+    let toks = lex(src)?;
     let mut p = Parser {
         toks,
         i: 0,
@@ -247,7 +268,13 @@ pub fn parse_program_strict(src: &str) -> Result<Vec<Stmt>> {
 
 // ============ Lexer ============
 
-fn lex(src: &str) -> Result<Vec<Spanned>> {
+/// The longest `#` run the grammar accepts as a raw-string delimiter:
+/// `r"..."` through 16 hashes. The cap exists so a pathological run cannot turn
+/// the closing scan into a search; 16 is far past what any generated JSON,
+/// Windows path or regex needs.
+const MAX_RAW_HASHES: usize = 16;
+
+fn lex(src: &str) -> Result<Vec<Spanned>, ParseError> {
     let mut out = Vec::<Spanned>::new();
     let chars: Vec<char> = src.chars().collect();
     let mut pos = 0;
@@ -296,6 +323,33 @@ fn lex(src: &str) -> Result<Vec<Spanned>> {
     fn peek_next(chars: &[char], pos: usize) -> Option<char> {
         if pos + 1 < chars.len() {
             Some(chars[pos + 1])
+        } else {
+            None
+        }
+    }
+
+    // Helper: `pos` sits just after the `r` of a candidate raw literal, so the
+    // count is the number of `#` delimiters before the opening quote —
+    // `Some(0)` for `r"`, `Some(2)` for `r##"`. `None` when this is not a raw
+    // literal at all, which is what keeps `r`, `r1`, `raw` and `r#comment`
+    // ordinary identifiers.
+    //
+    // Bounded rather than quadratic: the scan stops at the first non-`#`, so
+    // the cost is one pass over the run (plus the cap check), not one pass per
+    // candidate delimiter.
+    fn raw_string_prefix(chars: &[char], pos: usize) -> Option<usize> {
+        if peek(chars, pos) == Some('"') {
+            return Some(0);
+        }
+        if peek(chars, pos) != Some('#') {
+            return None;
+        }
+        let mut hashes = 0usize;
+        while peek(chars, pos + hashes) == Some('#') {
+            hashes += 1;
+        }
+        if peek(chars, pos + hashes) == Some('"') {
+            Some(hashes)
         } else {
             None
         }
@@ -558,11 +612,10 @@ fn lex(src: &str) -> Result<Vec<Spanned>> {
                         col: start_col,
                     });
                 } else {
-                    return Err(anyhow!(
+                    return Err(ParseError::new(format!(
                         "unknown character '&' at line {}, column {}",
-                        start_line,
-                        start_col
-                    ));
+                        start_line, start_col
+                    )));
                 }
             }
             '+' => {
@@ -646,51 +699,92 @@ fn lex(src: &str) -> Result<Vec<Spanned>> {
                 });
             }
             '"' => {
-                advance(&chars, &mut pos, &mut line, &mut col);
+                let open_line = start_line;
+                let open_col = start_col;
+                advance(&chars, &mut pos, &mut line, &mut col); // opening "
                 let mut s = String::new();
-                while let Some(ch) = peek(&chars, pos) {
+                loop {
+                    let ch_line = line;
+                    let ch_col = col;
+                    let Some(ch) = peek(&chars, pos) else {
+                        return Err(ParseError::with_hint(
+                            format!(
+                                "unterminated string literal: opened at line {}, column {} and never closed",
+                                open_line, open_col
+                            ),
+                            "add the closing '\"' on the same or a later line, or use a raw literal r\"...\" when the text itself contains quotes",
+                        ));
+                    };
                     advance(&chars, &mut pos, &mut line, &mut col);
                     if ch == '"' {
                         break;
                     }
-                    if ch == '\\' {
-                        if let Some(esc) = peek(&chars, pos) {
-                            advance(&chars, &mut pos, &mut line, &mut col);
-                            s.push(match esc {
-                                'n' => '\n',
-                                'r' => '\r',
-                                't' => '\t',
-                                '\\' => '\\',
-                                '"' => '"',
-                                other => other,
-                            });
-                        }
-                    } else {
+                    if ch != '\\' {
                         s.push(ch);
+                        continue;
                     }
+                    // A double-quoted string recognizes only these five escapes.
+                    let Some(esc) = peek(&chars, pos) else {
+                        return Err(ParseError::with_hint(
+                            format!(
+                                "unterminated escape sequence at line {}, column {}: the string opened at line {}, column {} ends with a bare backslash",
+                                ch_line, ch_col, open_line, open_col
+                            ),
+                            "remove the trailing backslash, or write \\\\ for one backslash, or use a raw literal r\"...\"",
+                        ));
+                    };
+                    advance(&chars, &mut pos, &mut line, &mut col);
+                    s.push(match esc {
+                        'n' => '\n',
+                        'r' => '\r',
+                        't' => '\t',
+                        '\\' => '\\',
+                        '"' => '"',
+                        other => {
+                            return Err(ParseError::with_hint(
+                                format!(
+                                    "unknown escape sequence '\\{}' at line {}, column {}: a double-quoted literal allows only \\\\, \\\", \\n, \\r and \\t",
+                                    other, ch_line, ch_col
+                                ),
+                                "write \\\\ for one backslash, or use a raw literal r\"...\"",
+                            ));
+                        }
+                    });
                 }
                 out.push(Spanned {
                     kind: Tok::String,
                     text: s,
-                    line: start_line,
-                    col: start_col,
+                    line: open_line,
+                    col: open_col,
                 });
             }
             '\'' => {
-                advance(&chars, &mut pos, &mut line, &mut col);
+                let open_line = start_line;
+                let open_col = start_col;
+                advance(&chars, &mut pos, &mut line, &mut col); // opening '
                 let mut s = String::new();
-                while let Some(ch) = peek(&chars, pos) {
+                loop {
+                    let Some(ch) = peek(&chars, pos) else {
+                        return Err(ParseError::with_hint(
+                            format!(
+                                "unterminated string literal: opened at line {}, column {} and never closed",
+                                open_line, open_col
+                            ),
+                            "add the closing \"'\" on the same or a later line",
+                        ));
+                    };
                     advance(&chars, &mut pos, &mut line, &mut col);
                     if ch == '\'' {
                         break;
                     }
+                    // No escape pass: a backslash stays one and `${...}` stays a hole.
                     s.push(ch);
                 }
                 out.push(Spanned {
                     kind: Tok::String,
                     text: s,
-                    line: start_line,
-                    col: start_col,
+                    line: open_line,
+                    col: open_col,
                 });
             }
             d if d.is_ascii_digit() => {
@@ -704,6 +798,77 @@ fn lex(src: &str) -> Result<Vec<Spanned>> {
                 });
             }
             c if is_ident_start(c) => {
+                // A raw literal is checked before the word `r` is read as an
+                // identifier, and only when the `r` is immediately followed by
+                // the quote (or by `#`s and then a quote). Every other spelling
+                // — `r`, `r1`, `raw`, `r#comment` — takes the identifier path
+                // below unchanged.
+                let delimiters = if c == 'r' {
+                    raw_string_prefix(&chars, pos + 1)
+                } else {
+                    None
+                };
+                if let Some(hashes) = delimiters {
+                    if hashes > MAX_RAW_HASHES {
+                        return Err(ParseError::with_hint(
+                            format!(
+                                "raw string literal at line {}, column {} uses {} '#' delimiters; the maximum is {}",
+                                start_line, start_col, hashes, MAX_RAW_HASHES
+                            ),
+                            "reduce the '#' run to at most 16, as in r#\"...\"#",
+                        ));
+                    }
+                    advance(&chars, &mut pos, &mut line, &mut col); // r
+                    for _ in 0..hashes {
+                        advance(&chars, &mut pos, &mut line, &mut col);
+                    }
+                    advance(&chars, &mut pos, &mut line, &mut col); // opening "
+                    let mut text = String::new();
+                    loop {
+                        let Some(ch) = peek(&chars, pos) else {
+                            return Err(ParseError::with_hint(
+                                format!(
+                                    "unterminated raw string literal: opened at line {}, column {} with {} '#' delimiter(s) and never closed",
+                                    start_line, start_col, hashes
+                                ),
+                                "close it with a quote followed by exactly the same number of '#', as in r#\"...\"#",
+                            ));
+                        };
+                        // The terminator is a quote followed by exactly the
+                        // opening run of `#`. A shorter run is content, not
+                        // a close: `r##"a"#b"##` is the four characters
+                        // `a"#b`.
+                        if ch == '"' && (0..hashes).all(|k| peek(&chars, pos + 1 + k) == Some('#'))
+                        {
+                            for _ in 0..=hashes {
+                                advance(&chars, &mut pos, &mut line, &mut col);
+                            }
+                            break;
+                        }
+                        text.push(ch);
+                        advance(&chars, &mut pos, &mut line, &mut col);
+                    }
+                    // Adjacent to an exact close, one more `#` would be
+                    // lexed as the start of a line comment and swallow the
+                    // rest of the line. Refusing it keeps that `#` from
+                    // disappearing unannounced.
+                    if peek(&chars, pos) == Some('#') {
+                        return Err(ParseError::with_hint(
+                            format!(
+                                "unexpected '#' immediately after the raw string literal opened at line {}, column {}: {} '#' delimiter(s) closed it, so this '#' would start a comment",
+                                start_line, start_col, hashes
+                            ),
+                            "delete the extra '#', or raise the delimiter count so it belongs to the literal",
+                        ));
+                    }
+                    out.push(Spanned {
+                        kind: Tok::RawString,
+                        text,
+                        line: start_line,
+                        col: start_col,
+                    });
+                    continue;
+                }
                 let mut s = String::new();
                 while let Some(ch) = peek(&chars, pos) {
                     if is_ident_part(ch) {
@@ -804,12 +969,10 @@ fn lex(src: &str) -> Result<Vec<Spanned>> {
                 continue; // Don't push a token, just skip the comment
             }
             other => {
-                return Err(anyhow!(
+                return Err(ParseError::new(format!(
                     "unknown character '{}' at line {}, column {}",
-                    other,
-                    start_line,
-                    start_col
-                ));
+                    other, start_line, start_col
+                )));
             }
         }
     }
@@ -1267,6 +1430,7 @@ impl Parser {
                     Tok::Fn,
                     Tok::Async,
                     Tok::String,
+                    Tok::RawString,
                     Tok::Int,
                     Tok::Float,
                     Tok::LBrace,
@@ -1607,6 +1771,7 @@ impl Parser {
                         Tok::Fn,
                         Tok::Async,
                         Tok::String,
+                        Tok::RawString,
                         Tok::Int,
                         Tok::Float,
                         Tok::LBrace,
@@ -1723,6 +1888,14 @@ impl Parser {
         if self.match_tok(Tok::String) {
             let s = self.prev().text.clone();
             return Ok(Expr::LitStr(s));
+        }
+        // A raw literal keeps the spelling the author wrote: no escape pass, no
+        // interpolation. That is what makes it usable for JSON, regexes,
+        // Windows paths and `${...}` templates the language itself would
+        // otherwise evaluate.
+        if self.match_tok(Tok::RawString) {
+            let s = self.prev().text.clone();
+            return Ok(Expr::LitRawStr(s));
         }
         if self.match_tok(Tok::Float) {
             let x: f64 = self.prev().text.parse().unwrap_or(0.0);
@@ -1981,7 +2154,7 @@ impl Parser {
             let n: i64 = self.prev().text.parse().unwrap_or(0);
             return Ok(Pattern::LitInt(n));
         }
-        if self.match_tok(Tok::String) {
+        if self.match_tok(Tok::String) || self.match_tok(Tok::RawString) {
             let s = self.prev().text.clone();
             return Ok(Pattern::LitStr(s));
         }
@@ -2085,6 +2258,7 @@ impl Parser {
                     | Tok::Int
                     | Tok::Float
                     | Tok::String
+                    | Tok::RawString
                     | Tok::True
                     | Tok::False
                     | Tok::Null
@@ -2150,7 +2324,7 @@ impl Parser {
             .next()
             .is_some_and(|c| c.is_alphabetic() || c == '_')
             && t.text.chars().all(|c| c.is_alphanumeric() || c == '_');
-        if wordlike && !matches!(t.kind, Tok::String | Tok::Eof) {
+        if wordlike && !matches!(t.kind, Tok::String | Tok::RawString | Tok::Eof) {
             let text = t.text.clone();
             self.i += 1;
             return Ok(text);
@@ -2159,14 +2333,20 @@ impl Parser {
     }
 
     fn need_ident(&mut self, msg: &'static str) -> Result<String> {
-        if self.match_tok(Tok::Ident) || self.match_tok(Tok::String) {
+        if self.match_tok(Tok::Ident)
+            || self.match_tok(Tok::String)
+            || self.match_tok(Tok::RawString)
+        {
             Ok(self.prev().text.clone())
         } else {
             Err(self.error_with_suggestion(msg))
         }
     }
+    /// A module path, a quoted record key, or any other place a string literal
+    /// is accepted. A raw literal is accepted wherever an ordinary one is: the
+    /// value is the same `String`, only the spelling differs.
     fn need_string(&mut self, msg: &'static str) -> Result<String> {
-        if self.match_tok(Tok::String) {
+        if self.match_tok(Tok::String) || self.match_tok(Tok::RawString) {
             Ok(self.prev().text.clone())
         } else {
             Err(self.error_with_suggestion(msg))

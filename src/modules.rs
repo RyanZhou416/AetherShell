@@ -66,6 +66,7 @@ pub fn proc_module() -> Value {
         ("kill", "proc_kill"),
         ("info", "proc_info"),
         ("spawn", "proc_spawn"),
+        ("run", "proc_run"),
         ("wait", "proc_wait"),
         ("exists", "proc_exists"),
         ("children", "proc_children"),

@@ -5875,6 +5875,23 @@ pub static SIGNATURES: &[Signature] = &[
     // process or edit the working tree, and `tests/declared_signatures.rs`
     // executes every declared example on every machine.
     Signature {
+        name: "proc_run",
+        category: Some("Process"),
+        subject_required: false,
+        aliases: &[],
+        subject: None,
+        params: &[
+            req("argv", Ty::Array, "non-empty array of strings: executable followed by its literal arguments; no implicit shell"),
+            opt("options", Ty::Record, "encoding: utf-8 (default), gbk, utf-16le, utf-16be, or bytes; timeout_ms: 1..600000 (default 120000); max_output_bytes: 1..16777216 per stream (default 1048576)"),
+        ],
+        returns: "Record",
+        doc: "Run an argv array directly and return separate process and decoding facts: proc_run([\"git\", \"status\"], {encoding: \"utf-8\"}). stdout/stderr retain base64 bytes and byte counts; strict text decoding never inserts replacement characters, strips a BOM, or changes newlines. Invalid decoding sets text to null and decoded to false without losing the child's exit status or bytes. encoding: \"bytes\" disables decoding. Output limits, timeout and cleanup are explicit; partial capture is never complete. Uses the execution policy. The examples are argument refusals and start nothing.",
+        examples: &[
+            (r#"try { proc_run([]) } catch e { e.error.code }"#, "E_BAD_ARG"),
+            (r#"try { proc_run([], {encoding: "bytes"}) } catch e { e.error.code }"#, "E_BAD_ARG"),
+        ],
+    },
+    Signature {
         name: "proc_spawn",
         category: None,
         subject_required: false,

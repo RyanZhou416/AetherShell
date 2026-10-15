@@ -18,27 +18,29 @@ fn lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 const SOURCE: &str = include_str!("../src/builtins.rs");
+const PROCESS_RUN_SOURCE: &str = include_str!("../src/process_run.rs");
 
 /// Extract `fn bi_<name>` bodies by brace matching — the same evidence-reading
 /// approach as `tests/effect_ratchet.rs`, for the same reason: a list derived
 /// from names would drift from what the code does.
-fn builtin_bodies() -> Vec<(String, String)> {
+fn function_bodies(source: &str, prefix: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    let bytes = SOURCE.as_bytes();
+    let bytes = source.as_bytes();
+    let needle = format!("fn {prefix}");
     let mut search = 0usize;
-    while let Some(rel) = SOURCE[search..].find("fn bi_") {
+    while let Some(rel) = source[search..].find(&needle) {
         let start = search + rel;
-        search = start + 6;
-        let rest = &SOURCE[start + 3..];
+        search = start + needle.len();
+        let rest = &source[start + 3..];
         let name_end = match rest.find(|c: char| !(c.is_alphanumeric() || c == '_')) {
             Some(i) => i,
             None => continue,
         };
-        let builtin = match rest[..name_end].strip_prefix("bi_") {
+        let builtin = match rest[..name_end].strip_prefix(prefix) {
             Some(n) if !n.is_empty() => n.to_string(),
             _ => continue,
         };
-        let brace = match SOURCE[start..].find('{') {
+        let brace = match source[start..].find('{') {
             Some(i) => start + i,
             None => continue,
         };
@@ -82,10 +84,24 @@ fn builtin_bodies() -> Vec<(String, String)> {
             i += 1;
         }
         if depth == 0 && i > brace {
-            out.push((builtin, SOURCE[brace..=i.min(bytes.len() - 1)].to_string()));
+            out.push((builtin, source[brace..=i.min(bytes.len() - 1)].to_string()));
         }
     }
     out
+}
+
+fn builtin_bodies() -> Vec<(String, String)> {
+    let mut bodies = function_bodies(SOURCE, "bi_");
+    for (_, body) in &mut bodies {
+        if body.contains("crate::process_run::run(") {
+            *body = function_bodies(PROCESS_RUN_SOURCE, "")
+                .into_iter()
+                .find(|(name, _)| name == "run")
+                .expect("the delegated process runner must exist")
+                .1;
+        }
+    }
+    bodies
 }
 
 /// Whether a body enforces policy for itself — by calling a `guard_*` helper,
@@ -109,6 +125,20 @@ fn enforces_policy_itself(body: &str) -> bool {
         }
     }
     false
+}
+
+#[test]
+fn a_delegated_process_guard_is_inspected_in_its_own_implementation() {
+    let (_, body) = builtin_bodies()
+        .into_iter()
+        .find(|(name, _)| name == "proc_run")
+        .expect("proc_run wrapper");
+    assert!(enforces_policy_itself(&body));
+    let unguarded = body.replace("safety::guard_exec(", "unchecked_exec(");
+    assert!(
+        !enforces_policy_itself(&unguarded),
+        "removing the implementation's guard must be detected"
+    );
 }
 
 #[test]

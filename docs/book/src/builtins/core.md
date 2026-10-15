@@ -189,15 +189,22 @@ sleep(0.1)           # Sleep for 100 milliseconds
 ## Shell Interop
 
 ### `sh` / `shell`
-Execute a raw shell command and return its output as a string.
+Execute a program and return the legacy `{stdout, stderr, success, exit_code}` record. A string argument is split into words; an argv array avoids that parsing. No implicit shell evaluates pipes or redirects. The interpreter's `sh` switch must permit the call. Legacy output uses lossy UTF-8 decoding; use `proc_run` when decoding errors or binary fidelity matter.
 
 ```aethershell
-let result = sh "git status --short"
-echo result
-
-# Capture structured output by parsing
-sh "git branch" | split "\n" | map(fn(b) => trim b)
+let result = sh(["git", "status", "--short"])
+result.stdout
 ```
+
+### `proc_run`
+Run a non-empty argv array directly, with explicit output encoding and separate process/decoding facts. It accepts `utf-8` (strict default), `gbk`, `utf-16le`, `utf-16be`, or `bytes`, with bounded concurrent stdout/stderr capture. Both streams retain base64 bytes even when strict text decoding fails. No BOM stripping, encoding guessing or newline conversion is performed; the execution policy still applies.
+
+```aethershell
+proc_run(["git", "--version"], {encoding: "utf-8"})
+proc_run(["binary-tool.exe"], {encoding: "bytes", max_output_bytes: 4096})
+```
+
+The programs in these examples must be installed; `success` on the returned record is different from the Agent API envelope's success. See [explicit process output](../../../api/PROCESS_RUN.md) for options, result fields, timeout and output-limit behavior.
 
 ### `call`
 Call a function or builtin by name (as a string).

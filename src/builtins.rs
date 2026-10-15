@@ -4053,6 +4053,7 @@ pub const FALLBACK_BUILTINS: &[(&str, &str)] = &[
     ("ontology_owl", "bi_ontology_owl"),
     ("ontology_shacl", "bi_ontology_shacl"),
     ("open", "bi_open"),
+    ("proc_run", "bi_proc_run"),
     ("rewind", "bi_undo"),
     ("select", "bi_select_object"),
     ("select-object", "bi_select_object"),
@@ -4299,6 +4300,7 @@ fn call_with_input_inner(
         // reachability here is identical without touching that table.
         "char_len" => bi_char_len(args, input),
         "byte_len" => bi_byte_len(args, input),
+        "proc_run" => bi_proc_run(args, input),
 
         // Result handles (§ see crate::handles). Registered here rather than in
         // BUILTIN_LOOKUP because that table is index-coupled to BUILTIN_DISPATCH;
@@ -4618,6 +4620,16 @@ Data / pipelines:
 - keys   <record>                           # get record keys
 - len    <array|record|string>              # get length
 - type_of <value>                           # get type name
+
+String literals:
+- r"C:\temp\new"              # literal text: no escapes or ${...} interpolation
+- Double quotes accept only \\, \", \n, \r, \t; unknown escapes and missing closing quotes are errors.
+- Ordinary single quotes preserve backslashes but still interpolate ${...}; use raw strings for literal templates.
+
+Process execution:
+- proc_run <argv-array> [options]           # strict text decoding or bytes, with separate exit/decoding facts
+- proc_run(["program", "arg with spaces"], {encoding: "utf-8"})
+- proc_run(["program"], {encoding: "bytes"}) # base64 output bytes; no text decoding
 
 String functions:
 - split      <string> <delimiter>           # split into array
@@ -16077,6 +16089,10 @@ mod split_command_words_tests {
         assert!(split_command_words("echo \"open").is_err());
         assert!(split_command_words("echo \\").is_err());
     }
+}
+
+fn bi_proc_run(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    crate::process_run::run(args, input)
 }
 
 fn bi_sh(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {

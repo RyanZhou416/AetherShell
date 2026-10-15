@@ -422,7 +422,7 @@ fn classified_effect(name: &str) -> Option<Effect> {
         | "workflow_register" | "workflow_pipeline" | "workflow_map_reduce"
         | "workflow_saga" | "workflow_fan_out" | "workflow_scatter_gather"
         | "sh" | "exec" | "system" | "timeout" | "timeout_cmd" | "xargs" | "xargs_exec"
-        | "proc_spawn" | "strace" | "strace_cmd" | "ltrace" | "ltrace_cmd"
+        | "proc_run" | "proc_spawn" | "strace" | "strace_cmd" | "ltrace" | "ltrace_cmd"
         | "perf_stat" | "perf_record" | "tmux_new" | "tmux_send"
         // Also found by `tests/effect_coverage.rs`. Each of these runs a program
         // (locally, in a container, or on another host) with caller-supplied
@@ -4115,6 +4115,7 @@ pub const SELF_GUARDED: &[&str] = &[
     "platform_db_export",
     "podman_exec",
     "proc_kill",
+    "proc_run",
     "proc_spawn",
     "rbac_principal",
     "rlm_spawn",

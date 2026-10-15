@@ -136,6 +136,7 @@ impl Walk<'_> {
             Expr::LitInt(_)
             | Expr::LitFloat(_)
             | Expr::LitStr(_)
+            | Expr::LitRawStr(_)
             | Expr::LitBool(_)
             | Expr::Null
             | Expr::Ident(_) => {}

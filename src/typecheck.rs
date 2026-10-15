@@ -98,6 +98,10 @@ pub fn type_of_expr(expr: &Expr, env: &mut TypeEnv) -> Result<Type, TypeError> {
                 Ok(Type::String)
             }
         }
+        // A raw literal types as `String` unconditionally: `r"http://..."` is a
+        // string that happens to look like a URI, and the type must not invite
+        // URI-only builtins to accept it.
+        Expr::LitRawStr(_) => Ok(Type::String),
         Expr::LitBool(_) => Ok(Type::Bool),
         Expr::Null => Ok(Type::Null),
 

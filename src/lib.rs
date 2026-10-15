@@ -198,6 +198,9 @@ pub mod plugins;
 /// falls back to the transpiler.
 #[cfg(feature = "native")]
 pub mod posix;
+/// Explicit-encoding process execution with preserved output bytes.
+#[cfg(feature = "native")]
+pub mod process_run;
 /// Prompt rendering — fish-, oh-my-posh-, and pure-inspired prompt styles.
 #[cfg(feature = "native")]
 pub mod prompt;

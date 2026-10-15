@@ -34,13 +34,26 @@ Integer division always produces a Float:
 
 ### Strings
 
-Strings support `${expr}` interpolation:
+Ordinary double-quoted and single-quoted strings support `${expr}` interpolation:
 
 ```ae
 let name = "world"
 let greeting = "Hello, ${name}!"    # => "Hello, world!"
 let math = "2 + 2 = ${2 + 2}"      # => "2 + 2 = 4"
 ```
+
+Double quotes recognize only `\\`, `\"`, `\n`, `\r` and `\t` escapes. An unknown escape, a dangling backslash or a missing closing quote is an `E_PARSE` error; the program is not evaluated. Single quotes preserve backslashes but still interpolate `${...}`; they are not raw strings.
+
+Use a raw literal for paths, regular expressions, templates or other opaque text. Raw literals produce ordinary String values without backslash escapes or interpolation. Surround the quotes with matching hashes when the content contains quotes; up to 16 hashes are supported.
+
+```ae
+let path = r"C:\temp\new\file.txt"
+let regex = r"\d+\s+\w+"
+let template = r#"Hello ${name}, say "hello"."#
+let quoted_delimiter = r##"contains "# without ending here"##
+```
+
+Raw literals may span lines and preserve the exact contents between delimiters, including CRLF, LF, leading/trailing whitespace and Unicode code points. No indentation stripping or normalization is performed. Neither ordinary nor raw strings change the language's statement-separation rules: use semicolons where an explicit end of statement matters.
 
 String concatenation works with `+` and auto-converts the other operand:
 

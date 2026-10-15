@@ -16,6 +16,8 @@
 
 use anyhow::{anyhow, Result};
 
+use super::literal;
+
 /// Transpile a Zsh script (multi-line) to Aether code.
 pub fn transpile_zsh_to_ae(src: &str) -> Result<String> {
     let mut out = String::new();
@@ -545,7 +547,7 @@ fn render_arg_expr(tok: &Token) -> String {
             let mut s = String::from("\"");
             for p in pcs {
                 match p {
-                    Piece::Text(t) => s.push_str(&escape_in_double_quotes(t)),
+                    Piece::Text(t) => s.push_str(&literal::ae_quoted_body(t)),
                     Piece::Var(v) => {
                         s.push_str("${");
                         s.push_str(v);
@@ -678,49 +680,17 @@ fn is_float_literal(s: &str) -> bool {
         && s.chars().all(|c| c.is_ascii_digit() || c == '.')
 }
 
+/// A string literal for generated source: an assignment RHS, an array element,
+/// or a fallback `zsh -c` line. The name is the JSON-style spelling this used to
+/// have; every caller builds AetherShell source, so
+/// [`literal::ae_source_string`] decides the spelling.
 fn json_string_literal(s: &str) -> String {
-    let mut out = String::from("\"");
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+    literal::ae_source_string(s)
 }
 
+/// An AetherShell string literal with minimal escapes and *no* interpolation.
 fn double_quote_with_escapes(s: &str) -> String {
-    let mut out = String::from("\"");
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
-fn escape_in_double_quotes(s: &str) -> String {
-    let mut out = String::new();
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            _ => out.push(ch),
-        }
-    }
-    out
+    literal::ae_source_string(s)
 }
 /* =============================================================================
 Builtin mapping

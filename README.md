@@ -31,7 +31,7 @@
 
 ## Ryan's Windows source build
 
-This fork provides the `12.0.2+ryan.2` build for the local DSH adapter. It is not an official AetherShell release. See [fork maintenance](FORK_MAINTENANCE.md) for the upstream base, focused fixes, reproducible build checks, and rollback guidance. The upstream AGPL-3.0-or-later license remains in force.
+This fork provides the `12.0.2+ryan.3` source build for the local DSH adapter. It is not an official AetherShell release. See [fork maintenance](FORK_MAINTENANCE.md) for the upstream base, focused fixes, reproducible build checks, and rollback guidance. The upstream AGPL-3.0-or-later license remains in force.
 
 ## Agentic Benchmark
 

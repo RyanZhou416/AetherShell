@@ -1384,14 +1384,43 @@ fn try_assignment(s: &str) -> Option<String> {
     None
 }
 
-/// Copy a double-quoted string literal verbatim (including quotes).
+/// Copy one backslash pair from a quoted source literal into the double-quoted
+/// AetherShell literal being emitted.
+///
+/// The literal grammar accepts `\\`, `\"`, `\n`, `\r` and `\t`; every other
+/// pair is data, so its backslash is doubled. Copying it bare is an `E_PARSE`
+/// in the generated source, and the lexer that preceded raw literals dropped
+/// the backslash, so the value silently lost it.
+fn push_escaped_pair(out: &mut String, escaped: char) {
+    if matches!(escaped, '\\' | '"' | 'n' | 'r' | 't') {
+        out.push('\\');
+    } else {
+        out.push_str("\\\\");
+    }
+    out.push(escaped);
+}
+
+/// Copy a double-quoted string literal, quotes included, with every backslash
+/// pair turned into a spelling the generated literal accepts.
 fn copy_dquote(chars: &[char], i: &mut usize, out: &mut String) {
     out.push('"');
     *i += 1;
     while *i < chars.len() && chars[*i] != '"' {
-        if chars[*i] == '\\' && *i + 1 < chars.len() {
-            out.push(chars[*i]);
-            *i += 1;
+        if chars[*i] == '\\' {
+            match chars.get(*i + 1).copied() {
+                Some(escaped) => {
+                    push_escaped_pair(out, escaped);
+                    *i += 2;
+                    continue;
+                }
+                // A backslash with nothing after it still has to reach the
+                // literal as data.
+                None => {
+                    out.push_str("\\\\");
+                    *i += 1;
+                    continue;
+                }
+            }
         }
         out.push(chars[*i]);
         *i += 1;
@@ -1436,10 +1465,30 @@ fn scan(s: &str) -> String {
             out.push('"');
             i += 1;
             while i < chars.len() && chars[i] != '\'' {
-                if chars[i] == '\\' && i + 1 < chars.len() {
-                    out.push(chars[i]);
-                    i += 1;
-                } else if chars[i] == '"' {
+                if chars[i] == '\\' {
+                    match chars.get(i + 1).copied() {
+                        // `\'` is this surface's escaped quote: it does not
+                        // close the literal, and an apostrophe needs no escape
+                        // inside a double-quoted AetherShell literal.
+                        Some('\'') => {
+                            out.push('\'');
+                            i += 2;
+                            continue;
+                        }
+                        // A trailing backslash is data.
+                        None => {
+                            out.push_str("\\\\");
+                            i += 1;
+                            continue;
+                        }
+                        Some(escaped) => {
+                            push_escaped_pair(&mut out, escaped);
+                            i += 2;
+                            continue;
+                        }
+                    }
+                }
+                if chars[i] == '"' {
                     out.push('\\');
                 }
                 out.push(chars[i]);
@@ -1456,9 +1505,28 @@ fn scan(s: &str) -> String {
             i += 1;
             let mut cmd = String::new();
             while i < chars.len() && chars[i] != '`' {
-                if chars[i] == '\\' && i + 1 < chars.len() {
-                    cmd.push(chars[i]);
-                    i += 1;
+                if chars[i] == '\\' {
+                    match chars.get(i + 1).copied() {
+                        // `\`` is this surface's escaped backtick: it does not
+                        // close the command, and a backtick needs no escape
+                        // inside a double-quoted AetherShell literal.
+                        Some('`') => {
+                            cmd.push('`');
+                            i += 2;
+                            continue;
+                        }
+                        // A trailing backslash is data.
+                        None => {
+                            cmd.push_str("\\\\");
+                            i += 1;
+                            continue;
+                        }
+                        Some(escaped) => {
+                            push_escaped_pair(&mut cmd, escaped);
+                            i += 2;
+                            continue;
+                        }
+                    }
                 }
                 cmd.push(chars[i]);
                 i += 1;

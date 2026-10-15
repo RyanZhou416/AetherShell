@@ -16,3 +16,7 @@ pub mod agentic;
 pub mod bash;
 pub mod powershell;
 pub mod zsh;
+
+/// The literal spelling shared by the three shell transpilers: private,
+/// because generated source is the only caller.
+mod literal;

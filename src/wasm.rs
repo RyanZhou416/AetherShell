@@ -192,6 +192,9 @@ fn eval_expr_wasm(expr: &Expr, env: &mut Env) -> Result<Value, String> {
         Expr::LitInt(n) => Ok(Value::Int(*n)),
         Expr::LitFloat(f) => Ok(Value::Float(*f)),
         Expr::LitStr(s) => Ok(Value::Str(interpolate_string(s, env)?)),
+        // Raw literals are not interpolated in the browser either, so the same
+        // source means the same thing on both targets.
+        Expr::LitRawStr(s) => Ok(Value::Str(s.clone())),
         Expr::Null => Ok(Value::Null),
         Expr::Ident(name) => env
             .get_var(name)

@@ -36,7 +36,8 @@ use aethershell::value::Value;
 /// first is public, so a module alias whose target lives in the second looks
 /// missing to any consumer that enumerates `BUILTIN_LOOKUP` alone. Worth
 /// unifying; until then, they are dispatchable and must not fail this test.
-const DISPATCHABLE_OUTSIDE_LOOKUP: &[&str] = &["agent", "ai", "swarm", "byte_len", "char_len"];
+const DISPATCHABLE_OUTSIDE_LOOKUP: &[&str] =
+    &["agent", "ai", "swarm", "byte_len", "char_len", "proc_run"];
 
 /// Builtin names referenced by a module alias that no builtin implements.
 ///

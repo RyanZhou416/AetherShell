@@ -56,7 +56,9 @@ fn classify_value_kind(expr: &aethershell::ast::Expr) -> SymbolKind {
         aethershell::ast::Expr::Lambda { .. } => SymbolKind::FUNCTION,
         aethershell::ast::Expr::Array(_) => SymbolKind::ARRAY,
         aethershell::ast::Expr::Record(_) => SymbolKind::STRUCT,
-        aethershell::ast::Expr::LitStr(_) => SymbolKind::STRING,
+        aethershell::ast::Expr::LitStr(_) | aethershell::ast::Expr::LitRawStr(_) => {
+            SymbolKind::STRING
+        }
         aethershell::ast::Expr::LitInt(_) | aethershell::ast::Expr::LitFloat(_) => {
             SymbolKind::NUMBER
         }

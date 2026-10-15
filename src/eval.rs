@@ -248,6 +248,7 @@ fn is_effect_free(e: &Expr) -> bool {
         Expr::LitInt(_)
         | Expr::LitFloat(_)
         | Expr::LitStr(_)
+        | Expr::LitRawStr(_)
         | Expr::LitBool(_)
         | Expr::Null
         | Expr::Ident(_) => true,
@@ -611,6 +612,9 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
                 Ok(Value::Str(s.clone()))
             }
         }
+        // A raw literal is its own text. Substituting here would make
+        // `r"${save_json(path, {})}"` perform the write it was written to avoid.
+        Expr::LitRawStr(s) => Ok(Value::Str(s.clone())),
         Expr::LitBool(b) => Ok(Value::Bool(*b)),
         Expr::Null => Ok(Value::Null),
 
@@ -1258,7 +1262,14 @@ fn bind_caught(
 /// handled here.
 fn free_idents(expr: &Expr, bound: &mut Vec<String>, out: &mut std::collections::BTreeSet<String>) {
     match expr {
-        Expr::LitInt(_) | Expr::LitFloat(_) | Expr::LitStr(_) | Expr::LitBool(_) | Expr::Null => {}
+        // A raw literal has no holes to interpolate, so it reads no names: its
+        // `${...}` is text, not a place a variable could be captured.
+        Expr::LitInt(_)
+        | Expr::LitFloat(_)
+        | Expr::LitStr(_)
+        | Expr::LitRawStr(_)
+        | Expr::LitBool(_)
+        | Expr::Null => {}
 
         Expr::Ident(name) => {
             if !bound.iter().any(|b| b == name) {

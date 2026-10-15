@@ -96,10 +96,6 @@ fn the_json_stays_parseable_when_the_message_contains_quotes_and_newlines() {
     // Multiple diagnostics are joined with newlines, and a diagnostic quotes
     // the offending character. Both must be escaped or the structured form an
     // agent parses is malformed.
-    //
-    // (An unterminated string literal is *not* a useful case here: the lexer
-    // runs it to end of input, so `let a = "oops` parses successfully as a
-    // multi-line string.)
     let text = parse_failure("let a = @\nlet b = @\nlet c = @").to_string();
     assert!(
         !text.contains('\n'),

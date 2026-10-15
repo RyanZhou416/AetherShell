@@ -8,7 +8,7 @@
 - **Tagline**: One language, every platform, deterministic typed output
 - **Binary**: `ae`
 - **Language**: Rust
-- **Version**: 1.6.0
+- **Source build**: 12.0.2+ryan.3
 - **Repository**: https://github.com/nervosys/AetherShell
 - **License**: AGPL-3.0-or-later
 - **File Extension**: `.ae`
@@ -19,7 +19,7 @@ AI agents today are forced to interact with shells designed decades ago for huma
 
 ## What Is AetherShell?
 
-AetherShell eliminates this entire class of failure. It provides a single cross-platform shell language with deterministic, typed output — every command returns structured data (Int, Float, String, Array, Record, Lambda), not raw text. An ontology built into the shell makes commands, their arguments, and their return types discoverable by AI agents without documentation scraping or prompt engineering. It has 1,100+ builtins (1,173 listed by its ontology; 1,439 callable names counting aliases) in 108 modules, native AI agents with multi-modal support, and implements the MCP, A2A, A2UI, and NANDA agentic protocols.
+AetherShell eliminates this entire class of failure. It provides a single cross-platform shell language with deterministic, typed output — every command returns structured data (Int, Float, String, Array, Record, Lambda), not raw text. An ontology built into the shell makes commands, their arguments, and their return types discoverable by AI agents without documentation scraping or prompt engineering. It has 1,100+ builtins (1,174 listed by its ontology; 1,440 callable names counting aliases) in 108 modules, native AI agents with multi-modal support, and implements the MCP, A2A, A2UI, and NANDA agentic protocols.
 
 ## How To Use AetherShell (for AI agents)
 
@@ -36,7 +36,16 @@ ai("Explain this code", {context: file.read("main.rs")})
 
 # File editing (safe, cross-platform)
 file.replace("config.rs", "DEBUG = false", "DEBUG = true")
+
+# Literal paths, regexes and templates: no escaping or interpolation
+let path = r"C:\temp\new\file.txt"
+let template = r#"Hello ${name}, say "hello"."#
+
+# External argv and explicit output decoding; no implicit shell
+proc_run(["git", "--version"], {encoding: "utf-8"})
 ```
+
+Use raw strings for opaque text. Ordinary double quotes interpret `\\`, `\"`, `\n`, `\r` and `\t`; an unknown escape or missing closing quote is an error. Ordinary single quotes preserve backslashes but still interpolate `${...}`. `proc_run` keeps output bytes as base64 and reports decoding separately from process success; use `encoding: "bytes"` to avoid decoding. [Process execution](docs/api/PROCESS_RUN.md) documents bounds and result fields.
 
 ### Option 2: Call the Agent API (HTTP)
 
