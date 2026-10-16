@@ -132,6 +132,7 @@ const WASM_BUILTINS: &[&str] = &[
     "contains",
     "map",
     "where",
+    "filter",
     "reduce",
     "first",
     "last",
@@ -848,7 +849,7 @@ fn eval_call_wasm(
             match (val, needle) {
                 (Value::Str(s), Value::Str(n)) => Ok(Value::Bool(s.contains(n.as_str()))),
                 (Value::Array(arr), n) => {
-                    let found = arr.iter().any(|v: &Value| values_equal(v, n));
+                    let found = arr.iter().any(|v: &Value| v == n);
                     Ok(Value::Bool(found))
                 }
                 _ => Err("contains requires a string or array".to_string()),
@@ -869,7 +870,7 @@ fn eval_call_wasm(
                 Err("map requires a lambda function".to_string())
             }
         }
-        "where" => {
+        "where" | "filter" => {
             let arr = require_array(input, args)?;
             let func_idx = if input.is_some() { 0 } else { 1 };
             let func = args.get(func_idx).ok_or("where requires a function")?;

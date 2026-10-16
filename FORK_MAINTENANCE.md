@@ -4,7 +4,7 @@ This fork is maintained at https://github.com/RyanZhou416/AetherShell and starts
 
 ## Runtime identity
 
-The source build identifies itself as `12.0.2+ryan.9`. That build-metadata suffix distinguishes it from the official `12.0.2` precompiled package without claiming a new upstream release. The lockfile pins the process-group dependency and its platform support; `encoding_rs` is already present in the dependency graph. Building this version does not replace an installed interpreter.
+The source build identifies itself as `12.0.2+ryan.10`. That build-metadata suffix distinguishes it from the official `12.0.2` precompiled package without claiming a new upstream release. The lockfile pins the process-group dependency and its platform support; `encoding_rs` is already present in the dependency graph. Building this version does not replace an installed interpreter.
 
 ## Behavior to preserve
 
@@ -29,6 +29,10 @@ The source build identifies itself as `12.0.2+ryan.9`. That build-metadata suffi
 - File removal with force suppresses only genuine NotFound errors. Environment writes validate names, types and NUL before OS calls; reads distinguish unset from non-Unicode values. Platform-store reads never turn corruption or I/O failure into an empty map, and mutations guard the actual store path before writing. Corrupt stores are not overwritten; this is not a promise of concurrent-writer isolation or transactions.
 - Evaluation is strict by default, without a compatibility mode: an unbound variable is `E_UNBOUND_VARIABLE`, explicit null bindings remain null, and unsupported named arguments fail before their expressions run. Record-oriented selection, grouping, sorting, filtering and numeric measurement reject missing fields or wrong types instead of inventing empty values or dropping rows. Explicit optional/default operations remain distinct from an undefined source name.
 - Native failure envelopes expose an object at `metadata.error` as well as legacy error text. Keep code, expected/got, phase and known execution progress readable without another JSON parse. `safe_to_retry:false` is not overridden by a legacy `retryable` hint: an error may require correcting arguments while earlier effects remain. Failed source parsing and typed preparation can report no effects; execution failures must not claim rollback or that nothing ran.
+- `filter` aliases `where`; `contains` accepts String substring lookup or typed Array element equality, never stringified membership. The declarations for `ps` and `ls` name the actual fields and platform units instead of promising unsupported uniform semantics.
+- Returned ordinary Windows disk paths omit the verbatim prefix only when their meaning survives Win32 conversion. Long, device, reserved and trailing-dot/space paths keep verbatim syntax. Operations still use validated canonical paths; this is not path-identity or permission normalization.
+- `proc_run` adds child-only cwd/environment, concurrent bounded stdin, explicit prefix/tail capture, continue-on-preview-limit, and guarded exclusive raw-byte logs. Preserve legacy defaults, strict decoding and independent process, input, preview, log and cleanup facts. No ambient environment mutation, implicit shell, automatic log overwrite or stronger descendant-cleanup promise is introduced. [Process execution](docs/api/PROCESS_RUN.md) owns the options and bounds.
+- `walk` incrementally traverses a requested scope with relative include/exclude globs, directory pruning, depth/time/result/visit bounds, and bounded errors. Links are not followed; early stops and I/O failures are never complete no-match answers. Keep old `find` and `fs.walk` return types unchanged. [Traversal](docs/api/TRAVERSAL.md) owns the exact scope and completeness rules.
 - Native CLI, Agent API, and in-memory `sess_*` session behavior remain available for the DSH adapter. Interpreter sessions are live processes, not checkpointed or replayed commands.
 
 ## Build and validation
@@ -37,6 +41,8 @@ Use a Windows x64 Visual Studio Developer PowerShell or an equivalent MSVC build
 
 ```powershell
 cargo build --release --bins --locked -j 6
+cargo test --release --locked --test fork_agent_basics --test fork_process_run_options --test fork_traversal -j 4
+cargo test --release --locked --lib path_display::tests -j 4
 cargo test --release --locked --test fork_strict_evaluation --test fork_strict_collections --test fork_error_data -j 6
 cargo test --release --locked --test fork_scientific_literals --test fork_parser_numeric_literals --test fork_effect_errors --test fork_platform_store_errors -j 6
 cargo test --release --locked --lib request_body_tests -j 6
@@ -52,6 +58,8 @@ cargo test --release --locked --lib file_write_verified::tests -j 6
 cargo test --release --locked --test declared_signatures a_self_contained_example_produces_the_result_it_claims -j 6
 pwsh -NoProfile -File scripts/verify-dsh-compat.ps1 -Executable ./target/release/ae.exe
 ```
+
+The complete `declared_signatures` target currently has two existing failures outside these changes: insufficient optional-parameter examples for `platform_db_load`, and the Windows `monitor_ip_link` example returning Record where its declaration says Array. Do not report that whole target as passing; its other 26 checks pass in the batch-1/2 validation. These unrelated declarations are not repaired by extending process execution or traversal.
 
 The DSH adapter has its own interpreter, ownership, background-job, cancellation, and Windows file-policy tests. Run them against this executable before changing the installed runtime. Do not loosen the DSH file policy or enable interpreter-side approvals to make a compatibility check pass.
 

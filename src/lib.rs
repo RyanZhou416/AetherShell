@@ -202,6 +202,9 @@ pub mod os_tools;
 /// Package management — import resolution and aether.toml manifests.
 #[cfg(feature = "native")]
 pub mod packages;
+/// Readable path output that preserves verbatim-only Windows names.
+#[cfg(feature = "native")]
+pub mod path_display;
 /// Persistence — session state and data persistence.
 #[cfg(feature = "native")]
 pub mod persistence;
@@ -254,6 +257,9 @@ pub mod syntax_kb;
 /// Transpiler — AetherShell ↔ Bash compatibility layer.
 #[cfg(feature = "native")]
 pub mod transpile;
+/// Bounded directory traversal with pruning and explicit completeness.
+#[cfg(feature = "native")]
+pub mod traversal;
 /// Terminal UI — rich TUI with chat, agent dashboard, and media viewer.
 #[cfg(feature = "native")]
 pub mod tui;

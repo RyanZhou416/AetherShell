@@ -348,6 +348,7 @@ fn is_builtin(name: &str) -> bool {
         "map"
             | "reduce"
             | "where"
+            | "filter"
             | "select"
             | "group_by"
             | "agg"
@@ -528,7 +529,7 @@ fn type_builtin_call(
             }
             Ok(Type::Any)
         }
-        "where" => {
+        "where" | "filter" => {
             // where(array<T>, fn(T)->Bool) -> array<T>
             if let Some(Type::Array(t)) = args.first() {
                 return Ok(Type::Array(t.clone()));

@@ -71,6 +71,7 @@ lazy_static::lazy_static! {
         // Data/pipelines
         map.insert("map", 19);
         map.insert("where", 20);
+        map.insert("filter", 20); // alias for where (predicate filter)
         map.insert("reduce", 21);
         map.insert("take", 22);
         map.insert("keys", 23);
@@ -4083,6 +4084,7 @@ pub const FALLBACK_BUILTINS: &[(&str, &str)] = &[
     ("vault_conversions", "bi_vault_conversions"),
     ("vault_convert", "bi_vault_convert"),
     ("vault_models", "bi_vault_models"),
+    ("walk", "bi_walk"),
     ("where-object", "bi_where_object"),
 ];
 
@@ -4305,6 +4307,7 @@ fn call_with_input_inner(
         "proc_run" => bi_proc_run(args, input),
         "file_read_text" => bi_file_read_text(args, input),
         "file_write_verified" => bi_file_write_verified(args, input),
+        "walk" => bi_walk(args, input),
 
         // Result handles (§ see crate::handles). Registered here rather than in
         // BUILTIN_LOOKUP because that table is index-coupled to BUILTIN_DISPATCH;
@@ -7662,6 +7665,10 @@ fn swarm_from_record(cfg: BTreeMap<String, Value>, env: &mut Env) -> Result<Valu
 
 // --------------- File system commands ---------------
 
+fn bi_walk(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    crate::traversal::run(args, input)
+}
+
 fn bi_ls(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     let path_str = if args.is_empty() {
         ".".to_string()
@@ -7717,7 +7724,7 @@ fn bi_ls(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         record.insert("name".to_string(), Value::Str(name));
         record.insert(
             "path".to_string(),
-            Value::Str(path.to_string_lossy().to_string()),
+            Value::Str(crate::path_display::display_path(&path)),
         );
         record.insert("ext".to_string(), Value::Str(ext));
         record.insert("is_dir".to_string(), Value::Bool(metadata.is_dir()));
@@ -12432,35 +12439,50 @@ fn bi_replace(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     Ok(Value::Str(text.replace(old, new)))
 }
 
-/// contains(substring) - Check if string contains substring
+/// contains(needle) - Whether a string contains a substring, or an array an element
 /// Args:
-///   - substring: String - Substring to search for
-/// Returns: Bool - true if substring found
+///   - needle: a substring for a String subject, or an element for an Array subject
+/// Returns: Bool - true if the subject contains the needle
 ///
 /// Example:
 ///   "hello world" | contains("world")     # Returns true
+///   [1, 2, 3] | contains(2)               # Returns true
 fn bi_contains(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
-    let (input_val, substring_arg) = if let Some(inp) = input {
-        // Piped: input is string, args[0] is substring
+    let (input_val, needle_arg) = if let Some(inp) = input {
+        // Piped: the subject is the input, args[0] is the needle
         (
             inp,
             args.first()
-                .ok_or_else(|| crate::safety::arg_err("contains requires substring argument"))?,
+                .ok_or_else(|| crate::safety::arg_err("contains requires needle argument"))?,
         )
     } else {
-        // Not piped: args[0] is string, args[1] is substring
+        // Not piped: args[0] is the subject, args[1] is the needle
         (
             args.first()
-                .ok_or_else(|| crate::safety::arg_err("contains requires string input"))?
+                .ok_or_else(|| crate::safety::arg_err("contains requires string or array input"))?
                 .clone(),
             args.get(1)
-                .ok_or_else(|| crate::safety::arg_err("contains requires substring argument"))?,
+                .ok_or_else(|| crate::safety::arg_err("contains requires needle argument"))?,
         )
     };
 
-    let text = expect_string("contains", &input_val)?;
-    let substring = expect_string("contains", substring_arg)?;
-    Ok(Value::Bool(text.contains(substring)))
+    match &input_val {
+        // Text containment. A needle that is not a string is refused rather
+        // than stringified, so `contains("1", 1)` is E_BAD_ARG, not true.
+        Value::Str(text) => {
+            let needle = expect_string("contains", needle_arg)?;
+            Ok(Value::Bool(text.contains(needle)))
+        }
+        // Element containment by the same typed `Value` equality the rest of
+        // the language uses: no stringification, so 1, 1.0 and "1" are three
+        // different elements, and records and arrays compare by value.
+        Value::Array(items) => Ok(Value::Bool(items.iter().any(|item| item == needle_arg))),
+        other => Err(crate::safety::bad_arg(
+            "contains",
+            "a String or Array subject",
+            other.type_name(),
+        )),
+    }
 }
 
 /// starts_with(prefix) - Check if string starts with prefix
@@ -22692,7 +22714,7 @@ fn bi_fs_realpath(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     };
 
     if let Ok(real) = std::fs::canonicalize(&path) {
-        return Ok(Value::Str(real.to_string_lossy().to_string()));
+        return Ok(Value::Str(crate::path_display::display_path(&real)));
     }
     Ok(Value::Null)
 }

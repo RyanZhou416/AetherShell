@@ -263,7 +263,9 @@ try {
         @{ Id = 'A32'; Name = 'negative-function-arguments-remain-explicit'; Code = 'abs(-7)'; Want = '7' },
         @{ Id = 'A36'; Name = 'scientific-notation-is-one-assigned-value'; Code = 'x = 1e3; x'; Want = '1000' },
         @{ Id = 'A37'; Name = 'fractional-scientific-exponent-keeps-its-sign'; Code = '1.25e-2'; Want = '0.0125' },
-        @{ Id = 'A38'; Name = 'scientific-notation-is-a-float'; Code = 'type_of(1e3)'; Want = '"Float"' }
+        @{ Id = 'A38'; Name = 'scientific-notation-is-a-float'; Code = 'type_of(1e3)'; Want = '"Float"' },
+        @{ Id = 'A45'; Name = 'filter-alias-keeps-predicate-semantics'; Code = '[1,2,3] | filter(fn(x) => x > 1)'; Want = '[2,3]' },
+        @{ Id = 'A46'; Name = 'array-contains-does-not-stringify-elements'; Code = '[contains([1,2],2), contains([1],"1")]'; Want = '[true,false]' }
     )
     foreach ($expression in $expressions) {
         $run = Invoke-Ae -Arguments @('--deterministic', '-c', $expression.Code)
@@ -344,7 +346,9 @@ try {
         @{ Id = 'B8'; Name = 'explicit-process-runner'; RequestText = (@{action='call'; builtin='proc_run'; args=@(,@($script:Exe, '--version'))} | ConvertTo-Json -Compress -Depth 5) },
         @{ Id = 'B9'; Name = 'verified-utf16-file-write'; RequestText = (@{action='call'; builtin='file_write_verified'; args=@($fileIoPath,$fileIoText,@{encoding='utf-16le';bom='add';create_only=$true})} | ConvertTo-Json -Compress -Depth 5) },
         @{ Id = 'B10'; Name = 'bom-selected-file-read'; RequestText = (@{action='call'; builtin='file_read_text'; args=@($fileIoPath,@{encoding='bom';bom='strip'})} | ConvertTo-Json -Compress -Depth 5) },
-        @{ Id = 'B11'; Name = 'file-codec-conflict-keeps-raw-bytes'; RequestText = (@{action='call'; builtin='file_read_text'; args=@($fileIoPath,@{encoding='utf-8'})} | ConvertTo-Json -Compress -Depth 5) }
+        @{ Id = 'B11'; Name = 'file-codec-conflict-keeps-raw-bytes'; RequestText = (@{action='call'; builtin='file_read_text'; args=@($fileIoPath,@{encoding='utf-8'})} | ConvertTo-Json -Compress -Depth 5) },
+        @{ Id = 'B13'; Name = 'bounded-walk-states-its-early-stop'; RequestText = (@{action='call'; builtin='walk'; args=@($script:Temp,@{max_results=1})} | ConvertTo-Json -Compress -Depth 5) },
+        @{ Id = 'B14'; Name = 'explicit-child-directory-and-raw-log'; RequestText = (@{action='call'; builtin='proc_run'; args=@(@($script:Exe,'--version'),@{cwd=$script:Temp;stdout_log='candidate.log';capture='tail';on_output_limit='continue';max_output_bytes=256})} | ConvertTo-Json -Compress -Depth 6) }
     )
     foreach ($request in $requests) {
         $run = Invoke-Ae -Arguments @('agent', 'execute') -Stdin $request.RequestText
@@ -376,6 +380,18 @@ try {
             $read = $document.result
             $matches = ($read.success -ceq $false) -and ($read.decoded -ceq $false) -and ($null -eq $read.text) -and
                 ($read.sha256 -ceq $fileIoSha256) -and ($read.bytes -gt 0) -and ($read.base64.Length -gt 0)
+        } elseif ($request.Id -eq 'B13' -and $null -ne $document) {
+            $walk = $document.result
+            $matches = ($walk.matched -eq 1) -and ($walk.complete -ceq $false) -and
+                ($walk.stop_reason -ceq 'result_limit') -and ($walk.entries.Count -eq 1)
+        } elseif ($request.Id -eq 'B14' -and $null -ne $document) {
+            $captured = $document.result
+            $logPath = Join-Path $script:Temp 'candidate.log'
+            $matches = ($captured.success -ceq $true) -and ($captured.process.exit_code -eq 0) -and
+                ($captured.stdout.capture -ceq 'tail') -and ($captured.stdout.log.complete -ceq $true) -and
+                ($captured.stdin.requested -ceq $false) -and ($captured.stdout.text.Trim() -ceq $version) -and
+                (Test-Path -LiteralPath $logPath) -and
+                ([Convert]::ToBase64String([IO.File]::ReadAllBytes($logPath)) -ceq $captured.stdout.base64)
         } elseif ($request.ContainsKey('Expected') -and $null -ne $document) {
             $actual = ConvertTo-Json -InputObject $document.result -Compress -Depth 20
             $normalized = ConvertTo-Json -InputObject ($request.Expected | ConvertFrom-Json) -Compress -Depth 20
@@ -449,7 +465,7 @@ try {
         }
     }
 
-    $expectedIds = @('A1','A2','A3','A4','A5','A6','A7','A8','A9','A10','A11','A12','A13','A14','A15','A16','A17','A18','A19','A20','A21','A22','A23','A24','A25','A26','A27','A28','A29','A30','A31','A32','A33','A34','A35','A36','A37','A38','A39','A40','A41','A42','A43','A44','B1','B2','B3','B4','B5','B6','B7','B8','B9','B10','B11','B12','S1','S2','S3','S4','S5','S6')
+    $expectedIds = @('A1','A2','A3','A4','A5','A6','A7','A8','A9','A10','A11','A12','A13','A14','A15','A16','A17','A18','A19','A20','A21','A22','A23','A24','A25','A26','A27','A28','A29','A30','A31','A32','A33','A34','A35','A36','A37','A38','A39','A40','A41','A42','A43','A44','A45','A46','B1','B2','B3','B4','B5','B6','B7','B8','B9','B10','B11','B12','B13','B14','S1','S2','S3','S4','S5','S6')
     $actualIds = @($script:Checks | ForEach-Object { $_.id })
     if ($actualIds.Count -ne $expectedIds.Count -or @(Compare-Object $expectedIds $actualIds).Count -ne 0) {
         Add-Result 'Z0' 'all-required-checks-ran' $false "expected $($expectedIds.Count) checks; observed $($actualIds.Count)"

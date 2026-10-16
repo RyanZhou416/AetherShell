@@ -414,6 +414,7 @@ file_replace	WriteLocal
 file_type	ReadLocal
 file_write	WriteLocal
 file_write_verified	WriteLocal
+filter	Pure
 find	Pure
 finetune_cancel	Pure
 finetune_list	Pure
@@ -1371,6 +1372,7 @@ vault-models	Exec
 vault_conversions	Exec
 vault_convert	Exec
 vault_models	Exec
+walk	ReadLocal
 watchexec	Pure
 watchexec_run	Pure
 wc	ReadLocal

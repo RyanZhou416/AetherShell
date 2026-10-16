@@ -253,12 +253,14 @@ PIPELINES:
   [1,2,3] | map(fn(x) => x * 2) | reduce(fn(a,b) => a + b, 0)
 
 BUILTINS:
-  map, where, reduce, take, first, last, any, all
+  map, where (alias filter), reduce, take, first, last, any, all
   split, join, trim, upper, lower, replace, contains
   range, flatten, reverse, slice, zip, push, concat
   abs, min, max, floor, ceil, round, sqrt, pow
   env, json_parse, json_stringify, time, sleep
-  proc_run(argv, {encoding: "utf-8"})  # explicit argv, strict text or bytes
+  contains([1,2,3], 2) # typed Array membership; String subjects search substrings
+  walk(path, {exclude: ["target/**"], max_results: 1}) # inspect complete and stop_reason
+  proc_run(argv, {encoding: "utf-8", cwd: path, capture: "tail", on_output_limit: "continue"})
   file_read_text(path, {encoding: "bom", bom: "strip"}) # explicit BOM decoding; no guess without a mark
   file_write_verified(path, text) # strict String write and independent byte/hash readback
   Check result.success and result.decoded/verified; an Agent API envelope is not an effect guarantee.

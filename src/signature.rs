@@ -344,7 +344,10 @@ pub static SIGNATURES: &[Signature] = &[
         name: "where",
         category: None,
         subject_required: false,
-        aliases: &[],
+        // `filter` is the array-module spelling (`arr.filter`) and the jq-style
+        // name agents reach for; both dispatch to index 20, so one declaration
+        // covers both spellings.
+        aliases: &["filter"],
         subject: Some(Ty::Array),
         params: &[req(
             "predicate",
@@ -352,12 +355,14 @@ pub static SIGNATURES: &[Signature] = &[
             "fn(element) -> Bool, or fn(element, index)",
         )],
         returns: "Array",
-        doc: "Keep the elements for which the predicate returns true.",
+        doc: "Keep the elements for which the predicate returns true. `filter` is the same builtin.",
         examples: &[
             ("[1, 2, 3] | where(fn(x) => x > 1)", "[2, 3]"),
             // The subject may also be passed directly, which is the form the
             // hand-written catalogue entry used to advertise.
             ("where([1, 2, 3], fn(x) => x > 1)", "[2, 3]"),
+            // The alias is a first-class spelling, so it carries an example too.
+            ("filter([1, 2, 3], fn(x) => x > 1)", "[2, 3]"),
         ],
     },
     Signature {
@@ -688,16 +693,21 @@ pub static SIGNATURES: &[Signature] = &[
         category: None,
         subject_required: false,
         aliases: &[],
+        // `Any` because the subject may be a String or an Array; the body
+        // refuses anything else with E_BAD_ARG naming both accepted types.
         subject: Some(Ty::Any),
-        params: &[req("needle", Ty::Any, "substring or element to look for")],
+        params: &[req(
+            "needle",
+            Ty::Any,
+            "substring for a String subject, or element for an Array subject",
+        )],
         returns: "Bool",
-        // Strings only. This said "or an array an element" until
-        // `contains([1, 2, 3], 2)` was actually run: it answers
-        // `E_BAD_ARG: expected a string, got Array`. Exactly the kind of
-        // plausible-but-wrong sentence that name-derived documentation
-        // produces, written here by hand instead.
-        doc: "Whether a string contains a substring. Strings only.",
-        examples: &[(r#"contains("security fix", "security")"#, "true")],
+        doc: "Whether a string contains a substring, or an array contains an element. A string subject compares text and refuses a non-string needle; an array subject compares with same-typed Value equality, so 1, 1.0 and \"1\" are three different elements and records compare by value. Any other subject is E_BAD_ARG.",
+        examples: &[
+            (r#"contains("security fix", "security")"#, "true"),
+            (r#"contains([1, 2, 3], 2)"#, "true"),
+            ("[1, 2, 3] | contains(4)", "false"),
+        ],
     },
     Signature {
         name: "lower",
@@ -876,11 +886,25 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[opt("path", Ty::Str, "directory to list; defaults to the working directory")],
         returns: "Array",
-        doc: "List a directory as records with name, path, size and modified.",
+        doc: "List a directory as records with fields name (String, the file name), path (String, the entry's path as displayed), ext (String, the extension including the leading dot; empty when the name has none), is_dir (Bool), size (Int, bytes) and modified (Int, whole seconds since the Unix epoch; absent when the platform cannot report a modification time).",
         examples: &[
             (r#"(ls("src") | len) > 0"#, "true"),
             (r#"(ls() | len) > 0"#, "true"),
         ],
+    },
+    Signature {
+        // `ps` (index 230) shares `bi_proc_list` with `proc_list`; the ontology
+        // already adopts the shorter `ps` as canonical for that index, so the
+        // declaration is keyed on it and `proc_list` is the declared alias.
+        name: "ps",
+        category: Some("Process"),
+        subject_required: false,
+        aliases: &["proc_list"],
+        subject: None,
+        params: &[],
+        returns: "Array",
+        doc: "List running processes as records, taking no arguments. Fields: pid (Int, process id), name (String, process name), cpu (Float, platform-native CPU measure), mem (Float, platform-native memory measure) and command (String). Units are not normalized across platforms: on Windows cpu is total processor seconds and mem is working-set bytes, both from Get-Process, and command repeats the process name rather than a full command line; on Unix cpu and mem are the percent columns of `ps aux`, and name and command are both its command column. Legacy parsing substitutes zero for unavailable numeric fields; a zero is not evidence of a successful measurement.",
+        examples: &[("ps() | type_of", r#""Array""#)],
     },
     Signature {
         name: "fs_walk",
@@ -5876,13 +5900,30 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[
             req("argv", Ty::Array, "non-empty array of strings: executable followed by its literal arguments; no implicit shell"),
-            opt("options", Ty::Record, "encoding: utf-8 (default), gbk, utf-16le, utf-16be, or bytes; timeout_ms: 1..600000 (default 120000); max_output_bytes: 1..16777216 per stream (default 1048576)"),
+            opt("options", Ty::Record, "encoding: utf-8 (default), gbk, utf-16le, utf-16be or bytes; timeout_ms: 1..600000 (default 120000); max_output_bytes: 1..16777216 per stream (default 1048576); capture: prefix/tail; on_output_limit: terminate/continue; cwd; env: child-only String/null overrides; stdin or stdin_base64 (at most 16 MiB); stdout_log/stderr_log: exclusive raw-byte files; max_log_bytes: 1..1073741824 per stream (default 67108864)"),
         ],
         returns: "Record",
         doc: "Run an argv array directly and return separate process and decoding facts: proc_run([\"git\", \"status\"], {encoding: \"utf-8\"}). stdout/stderr retain base64 bytes and byte counts; strict text decoding never inserts replacement characters, strips a BOM, or changes newlines. Invalid decoding sets text to null and decoded to false without losing the child's exit status or bytes. encoding: \"bytes\" disables decoding. Output limits, timeout and cleanup are explicit; partial capture is never complete. Uses the execution policy. The examples are argument refusals and start nothing.",
         examples: &[
             (r#"try { proc_run([]) } catch e { e.error.code }"#, "E_BAD_ARG"),
             (r#"try { proc_run([], {encoding: "bytes"}) } catch e { e.error.code }"#, "E_BAD_ARG"),
+        ],
+    },
+    Signature {
+        name: "walk",
+        category: Some("FileSystem"),
+        subject_required: false,
+        aliases: &[],
+        subject: None,
+        params: &[
+            req("path", Ty::Str, "directory whose contents to traverse"),
+            opt("options", Ty::Record, "include/exclude: relative glob Arrays; max_depth (default 64); max_results (default 1000); max_entries (default 100000); max_errors (default 32); include_dirs; modified_after_ms: exclusive UTC epoch milliseconds"),
+        ],
+        returns: "Record",
+        doc: "Traverse incrementally without sorting the entire tree. Excluded directories are pruned; links are not followed. Return entries (path, relative_path, name, is_dir, size in bytes, modified_ms), complete, stop_reason, visited, matched, errors and omitted-error counts. Limits stop traversal itself, not just returned output; filesystem order is unspecified. A limit or I/O failure is not a complete no-match answer. Existing find and fs.walk retain their Array results.",
+        examples: &[
+            (r#"try { walk(123) } catch e { e.error.code }"#, "E_BAD_ARG"),
+            (r#"try { walk(123, {max_depth: 0}) } catch e { e.error.code }"#, "E_BAD_ARG"),
         ],
     },
     Signature {

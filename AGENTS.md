@@ -8,7 +8,7 @@
 - **Tagline**: One language, every platform, deterministic typed output
 - **Binary**: `ae`
 - **Language**: Rust
-- **Source build**: 12.0.2+ryan.9
+- **Source build**: 12.0.2+ryan.10
 - **Repository**: https://github.com/nervosys/AetherShell
 - **License**: AGPL-3.0-or-later
 - **File Extension**: `.ae`
@@ -19,7 +19,7 @@ AI agents today are forced to interact with shells designed decades ago for huma
 
 ## What Is AetherShell?
 
-AetherShell eliminates this entire class of failure. It provides a single cross-platform shell language with deterministic, typed output — every command returns structured data (Int, Float, String, Array, Record, Lambda), not raw text. An ontology built into the shell makes commands, their arguments, and their return types discoverable by AI agents without documentation scraping or prompt engineering. It has 1,100+ builtins (1,176 listed by its ontology; 1,442 callable names counting aliases) in 108 modules, native AI agents with multi-modal support, and implements the MCP, A2A, A2UI, and NANDA agentic protocols.
+AetherShell eliminates this entire class of failure. It provides a single cross-platform shell language with deterministic, typed output — every command returns structured data (Int, Float, String, Array, Record, Lambda), not raw text. An ontology built into the shell makes commands, their arguments, and their return types discoverable by AI agents without documentation scraping or prompt engineering. It has 1,100+ builtins (1,177 listed by its ontology; 1,444 callable names counting aliases) in 108 modules, native AI agents with multi-modal support, and implements the MCP, A2A, A2UI, and NANDA agentic protocols.
 
 ## How To Use AetherShell (for AI agents)
 
@@ -54,6 +54,8 @@ proc_run(["git", "--version"], {encoding: "utf-8"})
 Use raw strings for opaque text. Ordinary interpolation holes require exactly one expression and a closing brace; syntax or evaluation failures fail the operation rather than becoming successful error text. Ordinary double quotes interpret `\\`, `\"`, `\n`, `\r` and `\t`; an unknown escape or missing closing quote is an error. Ordinary single quotes preserve backslashes but still interpolate `${...}`. `proc_run` keeps output bytes as base64 and reports decoding separately from process success; use `encoding: "bytes"` to avoid decoding. [Process execution](docs/api/PROCESS_RUN.md) documents bounds and result fields.
 
 Scientific `e`/`E` notation such as `1e3` and `1.25e-2` is a single Float literal. Malformed exponents, overflowing Float literals and unsupported attached forms (`1e3foo`, `0x10`, `1_000`, `1.5k`) are parse errors, not partial values. Exact native integers use signed i64. Source integer literals and k/K/M/G scaling outside that range are parse errors, never zero or saturation. Binary subtraction does not depend on spacing; write negative function arguments as `abs(-7)` rather than `abs -7`. Integer arithmetic overflow is an error, not wrapping; JSON text ingestion rejects larger integer literals rather than silently rounding them. Keep larger exact identifiers quoted as JSON strings, and remember that the DSH adapter has its own narrower exact-number limit. `avg([])` is an error, `sum([])` is zero, and a materialized `range` is bounded at 1,000,000 items before allocation.
+
+`filter` aliases `where`; `contains` accepts String substrings or typed Array elements. `ps` declares its fields and platform-specific units. Ordinary Windows paths omit the verbatim prefix only when safe; long or Win32-special names keep it. Use `walk(path, {exclude:["target/**"], max_results:1})` for early-stop traversal, and inspect its `complete`/`stop_reason`; `find` and `fs.walk` are not lazy pipelines. `proc_run` supports child-only cwd/env, stdin or stdin_base64, prefix/tail capture and explicit raw-byte logs. See [process execution](docs/api/PROCESS_RUN.md) and [traversal](docs/api/TRAVERSAL.md) for limits and failure facts.
 
 Evaluation is strict by default: undefined source variables raise `E_UNBOUND_VARIABLE`, missing required record fields and unsupported named arguments fail explicitly, and explicit `null` remains valid. Failed Agent API responses expose directly readable `metadata.error`; legacy `error` text remains for older clients. `safe_to_retry:false` means not to repeat effects automatically, even when correcting the call is possible.
 

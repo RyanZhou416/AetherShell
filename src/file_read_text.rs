@@ -549,7 +549,10 @@ fn build_record(path: &Path, data: &[u8], requested: Choice, policy: BomPolicy) 
         "success".to_string(),
         Value::Bool(decoded.decoded != Some(false)),
     );
-    record.insert("path".to_string(), Value::Str(path.display().to_string()));
+    record.insert(
+        "path".to_string(),
+        Value::Str(crate::path_display::display_path(path)),
+    );
     record.insert("bytes".to_string(), Value::Int(data.len() as i64));
     record.insert("base64".to_string(), Value::Str(base64_standard(data)));
     record.insert("sha256".to_string(), Value::Str(sha256_hex(data)));

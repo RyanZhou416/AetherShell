@@ -217,7 +217,7 @@ fn utf8_text_and_bytes_survive_the_round_trip_without_rewriting_newlines() {
     assert!(flag(&record, "success"), "{record:?}");
     assert_eq!(
         text(&record, "path"),
-        path.canonicalize().unwrap().display().to_string()
+        aethershell::path_display::display_path(&path.canonicalize().unwrap())
     );
     assert_eq!(int(&record, "bytes"), RAW.len() as i64);
     assert_eq!(snapshot(&record), RAW, "the raw bytes must be unchanged");

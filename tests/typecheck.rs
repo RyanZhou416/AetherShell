@@ -74,6 +74,19 @@ fn where_preserves_array_type() {
 }
 
 #[test]
+fn filter_alias_preserves_the_same_type_as_where() {
+    for code in [
+        "filter([1,2,3], fn(x)=> x > 1)",
+        "[1,2,3] | filter(fn(x)=> x > 1)",
+    ] {
+        assert_eq!(
+            typecheck::infer_last_type(code).unwrap().name(),
+            "Array<Int>"
+        );
+    }
+}
+
+#[test]
 fn http_get_record_shape() {
     // http_get("https://example.com") -> Record{url:String, status:Int, headers:Record{* : String}, body:Any}
     let t = typecheck::infer_last_type(r#" http_get("https://example.com") "#).unwrap();

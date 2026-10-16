@@ -1056,7 +1056,7 @@ fn classified_effect(name: &str) -> Option<Effect> {
         "project_license" | "project_name" | "project_readme" | "project_size" |
         "plan_diff" | "project_structure" | "project_test_files" | "read_text" | "file_read_text"
         | "refactor_organize_imports" |
-        "ssh_config" | "tail" | "wc" => Some(Effect::ReadLocal),
+        "ssh_config" | "tail" | "walk" | "wc" => Some(Effect::ReadLocal),
         n if n.starts_with("file_") || n.starts_with("proc_") || n.starts_with("sys_") => {
             Some(Effect::ReadLocal)
         }
