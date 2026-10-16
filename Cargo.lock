@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "aethershell"
-version = "12.0.2+ryan.3"
+version = "12.0.2+ryan.4"
 dependencies = [
  "aes-gcm",
  "agentic-eval",
@@ -101,6 +101,7 @@ dependencies = [
  "sha2",
  "sysinfo",
  "tar",
+ "tempfile",
  "thiserror 1.0.69",
  "tiktoken-rs",
  "tokenizers",

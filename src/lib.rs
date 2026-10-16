@@ -150,6 +150,12 @@ pub mod explain;
 /// External tools — integration with system-installed CLI tools.
 #[cfg(feature = "native")]
 pub mod external_tools;
+/// Bounded file reads with explicit encoding and BOM handling.
+#[cfg(feature = "native")]
+pub mod file_read_text;
+/// Atomic text writes followed by independent byte-level readback.
+#[cfg(feature = "native")]
+pub mod file_write_verified;
 /// Result handles — keep a large result server-side and send a reference.
 #[cfg(feature = "native")]
 pub mod handles;

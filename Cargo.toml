@@ -4,7 +4,7 @@ exclude = ["web", "integrations/python"]
 
 [package]
 name = "aethershell"
-version = "12.0.2+ryan.3"
+version = "12.0.2+ryan.4"
 edition = "2021"
 authors = ["Nervosys <contact@nervosys.ai>"]
 description = "The world's first multi-agent shell with typed functional pipelines and multi-modal AI"
@@ -76,6 +76,7 @@ vendored-tls = ["reqwest/native-tls", "dep:openssl"]
 native = [
     "dep:process-wrap",
     "dep:encoding_rs",
+    "dep:tempfile",
     "dep:walkdir",
     "dep:which",
     "dep:crossterm",
@@ -192,6 +193,7 @@ rustc-hash = "2"
 # Native-only dependencies (terminal, TUI, system interaction)
 process-wrap = { version = "10.0.1", default-features = false, features = ["std", "process-group", "job-object"], optional = true }
 encoding_rs = { version = "0.8.35", optional = true }
+tempfile = { version = "3.24", optional = true }
 walkdir = { version = "2", optional = true }
 which = { version = "6", optional = true }
 crossterm = { version = "0.27", optional = true }

@@ -123,6 +123,19 @@ set_env "MY_VAR" "hello"
 echo (env).MY_VAR    # hello
 ```
 
+## Explicit file text I/O
+
+`file_read_text(path, options?)` (`file.read_text`) returns a bounded raw snapshot, its SHA-256, BOM facts and strict decoding status. Choose `utf-8`, `gbk`, `utf-16le`, `utf-16be`, `bom` or `bytes`; a missing mark in BOM-selected mode is an explicit failure, not an encoding guess. BOM policy defaults to preserving it, and stripping is explicit. Inspect the returned `success`, `decoded`, `text` and `error` before using text.
+
+`file_write_verified(path, content, options?)` (`file.write_verified`) strictly encodes a String, publishes through a private sibling temporary file, then reopens the target and compares bytes and SHA-256. Inspect `written` and `verified` independently: a post-write verification failure does not undo the write or overwrite another writer's bytes. Digest preconditions are checks rather than cross-process transactions.
+
+```aethershell
+file_read_text("marked.txt", {encoding: "bom", bom: "strip"})
+file_write_verified("output.txt", "甲\r\n乙\n", {encoding: "utf-8"})
+```
+
+The examples operate on real files under the current path policy. [File text I/O](../../../api/FILE_TEXT_IO.md) documents limits, BOM behavior, result fields and the distinct guarantees of legacy write, append and patch operations. Neither new interface normalizes line endings or guesses the Host codepage.
+
 ## JSON
 
 ### `json_parse`

@@ -3888,7 +3888,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[req("path", Ty::Str, "a file path")],
         returns: "String",
-        doc: "A text file's contents, subject to the read denylist and size limit.",
+        doc: "Read a file as strict UTF-8 and return its String contents, preserving a leading UTF-8 BOM and all newline bytes. Non-UTF-8 data is an I/O error; no encoding detection or replacement occurs. Subject to read-path policy and the file-size limit. Use file_read_text for explicit encodings, BOM policy, raw bytes and decoding status.",
         examples: &[
             (r#"(read_text("Cargo.toml") | len) > 0"#, r#"true"#),
         ],
@@ -4943,7 +4943,7 @@ pub static SIGNATURES: &[Signature] = &[
         returns: "Array",
         doc: "Declared builtins whose name or description contains every word of a query, as {name, signature, doc}; at most 10.",
         examples: &[
-            (r#"suggest("sha256 digest") | map(fn(s) => s.name)"#, r#"["sha256"]"#),
+            (r#"suggest("sha256 digest") | map(fn(s) => s.name)"#, r#"["sha256", "file_write_verified"]"#),
         ],
     },
     Signature {
@@ -5906,6 +5906,90 @@ pub static SIGNATURES: &[Signature] = &[
         examples: &[(r#"try { proc_spawn(123) } catch e { e.error.code }"#, "E_BAD_ARG")],
     },
     Signature {
+        name: "file_read_text",
+        category: Some("FileSystem"),
+        subject_required: false,
+        aliases: &[],
+        subject: None,
+        params: &[
+            req("path", Ty::Str, "regular file to read under the existing read-path policy"),
+            opt("options", Ty::Record, "encoding: utf-8 (default), gbk, utf-16le, utf-16be, bom, or bytes; bom: preserve (default), strip, require, forbid; max_bytes: 1..16777216, default 1048576"),
+        ],
+        returns: "Record",
+        doc: "Bounded whole-file read with explicit encoding and BOM policy. Returns {success,path,bytes,base64,sha256,complete,requested_encoding,encoding,decoded,text,bom:{detected,bytes,policy},error}. Raw bytes and SHA-256 describe the complete file even when decoding fails. Invalid text or a BOM mismatch returns success:false, decoded:false and text:null without replacement; I/O, policy and size failures are coded errors. encoding:bom requires a recognized BOM rather than guessing. preserve keeps U+FEFF; strip removes only a matching leading BOM; require requires and preserves it; forbid rejects a BOM. bytes mode performs no decoding and accepts only preserve. No newline or Unicode normalization is done; base64 increases result size.",
+        examples: &[
+            (r#"try { file_read_text(123) } catch e { e.error.code }"#, "E_BAD_ARG"),
+            (r#"try { file_read_text(123, {encoding: "bom"}) } catch e { e.error.code }"#, "E_BAD_ARG"),
+        ],
+    },
+    Signature {
+        name: "file_write_verified",
+        category: Some("FileSystem"),
+        subject_required: false,
+        aliases: &[],
+        subject: None,
+        params: &[
+            req("path", Ty::Str, "destination regular file; symlink replacement is refused"),
+            req("content", Ty::Str, "exact text to encode; no array or debug-rendered content"),
+            opt("options", Ty::Record, "encoding: utf-8 (default), gbk, utf-16le, utf-16be; bom: none (default) or add; max_bytes: 1..16777216, default 1048576; create_only: Bool; expected_sha256: prior file's 64-hex SHA-256"),
+        ],
+        returns: "Record",
+        doc: "Strictly encode a String, replace through a private sibling temporary file, then independently reread the target and compare bytes and SHA-256. Returns {success,path,written,verified,encoding,bom,expected_bytes,observed_bytes,expected_sha256,observed_sha256,precondition_sha256,verification:{method,matched,error}}. expected_sha256 in options checks the prior file before replacement; the result's expected_sha256 is the intended new digest. These checks are not an atomic compare-and-swap against concurrent writers. create_only refuses replacement and cannot be combined with a prior digest. Pre-write errors are coded failures; post-write readback failure returns written:true, verified:false, success:false without automatic rollback or retry. Verification is an observation, not a guarantee against later changes or crash durability. No BOM or newline conversion occurs except explicitly requested BOM addition.",
+        examples: &[
+            (r#"try { file_write_verified(123, "text") } catch e { e.error.code }"#, "E_BAD_ARG"),
+            (r#"try { file_write_verified(123, "text", {create_only: true}) } catch e { e.error.code }"#, "E_BAD_ARG"),
+        ],
+    },
+    Signature {
+        name: "file_write",
+        category: Some("FileSystem"),
+        subject_required: false,
+        aliases: &["write_file", "text_write"],
+        subject: None,
+        params: &[
+            req("path", Ty::Str, "destination file; creates or replaces it"),
+            opt("content", Ty::Any, "String, array joined by LF, or debug-rendered value; omit to take pipeline input"),
+        ],
+        returns: "Record",
+        doc: "Legacy UTF-8 write: file_write(path, content), or content | file_write(path). Returns {path, bytes, lines, success}; bytes and lines describe the rendered input, not a readback. A String is written without added BOM or final newline; an Array is joined with LF, and other values use debug rendering. A successful write is not independent content verification. Use file_write_verified for strict String content and post-write byte/hash verification. Uses the write policy. Refusal examples touch no files.",
+        examples: &[
+            (r#"try { file_write(123) } catch e { e.error.code }"#, "E_BAD_ARG"),
+            (r#"try { file_write(123, "text") } catch e { e.error.code }"#, "E_BAD_ARG"),
+        ],
+    },
+    Signature {
+        name: "file_append",
+        category: Some("FileSystem"),
+        subject_required: false,
+        aliases: &["append_file"],
+        subject: None,
+        params: &[
+            req("path", Ty::Str, "file to append to; created if absent"),
+            opt("content", Ty::Any, "String, array joined by LF, or debug-rendered value; omit to take pipeline input"),
+        ],
+        returns: "Record",
+        doc: "Append legacy UTF-8 content without inserting a separator, BOM or final newline. Returns {path, bytes_appended, success}; success means write completion, not readback or concurrency protection. An Array is joined with LF; other non-String values use debug rendering. Appending UTF-8 to a differently encoded file can corrupt it; decode and rewrite deliberately when changing encoding. Uses the write policy. Refusal examples touch no files.",
+        examples: &[
+            (r#"try { file_append(123) } catch e { e.error.code }"#, "E_BAD_ARG"),
+            (r#"try { file_append(123, "text") } catch e { e.error.code }"#, "E_BAD_ARG"),
+        ],
+    },
+    Signature {
+        name: "file_replace",
+        category: Some("FileSystem"),
+        subject_required: false,
+        aliases: &["text_replace", "str_replace_in_file"],
+        subject: None,
+        params: &[
+            req("path", Ty::Str, "existing UTF-8 file to edit"),
+            req("old_text", Ty::Str, "literal text to replace, including every occurrence"),
+            req("new_text", Ty::Str, "literal replacement text"),
+        ],
+        returns: "Record",
+        doc: "Replace every literal old_text occurrence through file_patch. Returns {path, applied, failed, success, patches_applied, patches_failed}; inspect success and failed even when the Agent API envelope succeeds. No match is a reported patch failure, not a thrown builtin error. Operates on strict UTF-8 and keeps newline sequences except those explicitly replaced. No independent post-write readback or concurrent-writer protection is performed.",
+        examples: &[(r#"try { file_replace(123, "old", "new") } catch e { e.error.code }"#, "E_BAD_ARG")],
+    },
+    Signature {
         name: "file_patch",
         category: None,
         subject_required: false,
@@ -5920,7 +6004,7 @@ pub static SIGNATURES: &[Signature] = &[
             ),
         ],
         returns: "Record",
-        doc: "Apply find/replace records to `path` and write it back, returning {path, applied, failed, success, patches_applied, patches_failed}: `file_patch(\"config.txt\", [{find: \"DEBUG=0\", replace: \"DEBUG=1\"}])`. The patches are one {find, replace} record or an array of them, passed positionally or piped; a record may use old/search and new/with instead of find/replace. The examples here show the one-argument and two-argument call shapes and both stop at validation, so neither writes anything.",
+        doc: "Apply find/replace records to `path` and write it back, returning {path, applied, failed, success, patches_applied, patches_failed}: `file_patch(\"config.txt\", [{find: \"DEBUG=0\", replace: \"DEBUG=1\"}])`. The patches are one {find, replace} record or an array of them, passed positionally or piped; a record may use old/search and new/with instead of find/replace. Patches are processed in order; valid patches may be written even when other patches fail. Inspect success and failed: a successful Agent API envelope does not mean every patch matched. No independent readback or concurrent-writer protection is performed. The examples stop at argument validation and write nothing.",
         examples: &[
             (r#"try { file_patch(123) } catch e { e.error.code }"#, "E_BAD_ARG"),
             (

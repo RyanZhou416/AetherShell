@@ -259,6 +259,9 @@ BUILTINS:
   abs, min, max, floor, ceil, round, sqrt, pow
   env, json_parse, json_stringify, time, sleep
   proc_run(argv, {encoding: "utf-8"})  # explicit argv, strict text or bytes
+  file_read_text(path, {encoding: "bom", bom: "strip"}) # explicit BOM decoding; no guess without a mark
+  file_write_verified(path, text) # strict String write and independent byte/hash readback
+  Check result.success and result.decoded/verified; an Agent API envelope is not an effect guarantee.
 
 PATTERN MATCHING:
   match value {

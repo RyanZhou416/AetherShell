@@ -4024,6 +4024,8 @@ pub const FALLBACK_BUILTINS: &[(&str, &str)] = &[
     ("describe", "bi_describe"),
     ("explain", "bi_ai_explain"),
     ("explain_effects", "bi_explain_effects"),
+    ("file_read_text", "bi_file_read_text"),
+    ("file_write_verified", "bi_file_write_verified"),
     ("fix", "bi_ai_fix"),
     ("foreach", "bi_foreach_object"),
     ("foreach-object", "bi_foreach_object"),
@@ -4301,6 +4303,8 @@ fn call_with_input_inner(
         "char_len" => bi_char_len(args, input),
         "byte_len" => bi_byte_len(args, input),
         "proc_run" => bi_proc_run(args, input),
+        "file_read_text" => bi_file_read_text(args, input),
+        "file_write_verified" => bi_file_write_verified(args, input),
 
         // Result handles (§ see crate::handles). Registered here rather than in
         // BUILTIN_LOOKUP because that table is index-coupled to BUILTIN_DISPATCH;
@@ -4630,6 +4634,13 @@ Process execution:
 - proc_run <argv-array> [options]           # strict text decoding or bytes, with separate exit/decoding facts
 - proc_run(["program", "arg with spaces"], {encoding: "utf-8"})
 - proc_run(["program"], {encoding: "bytes"}) # base64 output bytes; no text decoding
+
+File encoding and verified writes:
+- file_read_text(path, {encoding: "gbk"})    # bounded read, raw bytes, SHA-256 and decoding status
+- file_read_text(path, {encoding: "bom", bom: "strip"}) # decode only a recognized BOM; no guessing
+- file_write_verified(path, text)             # strict UTF-8 write plus byte/hash readback
+- Read the returned success/decoded/verified fields; an API envelope alone does not prove the operation succeeded.
+- Legacy file_patch may write matching patches even when other patches fail; no automatic rollback is implied.
 
 String functions:
 - split      <string> <delimiter>           # split into array
@@ -16089,6 +16100,14 @@ mod split_command_words_tests {
         assert!(split_command_words("echo \"open").is_err());
         assert!(split_command_words("echo \\").is_err());
     }
+}
+
+fn bi_file_read_text(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    crate::file_read_text::run(args, input)
+}
+
+fn bi_file_write_verified(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    crate::file_write_verified::run(args, input)
 }
 
 fn bi_proc_run(args: Vec<Value>, input: Option<Value>) -> Result<Value> {

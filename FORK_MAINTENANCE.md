@@ -4,7 +4,7 @@ This fork is maintained at https://github.com/RyanZhou416/AetherShell and starts
 
 ## Runtime identity
 
-The source build identifies itself as `12.0.2+ryan.3`. That build-metadata suffix distinguishes it from the official `12.0.2` precompiled package without claiming a new upstream release. The lockfile pins the process-group dependency and its platform support; `encoding_rs` is already present in the dependency graph. Building this version does not replace an installed interpreter.
+The source build identifies itself as `12.0.2+ryan.4`. That build-metadata suffix distinguishes it from the official `12.0.2` precompiled package without claiming a new upstream release. The lockfile pins the process-group dependency and its platform support; `encoding_rs` is already present in the dependency graph. Building this version does not replace an installed interpreter.
 
 ## Behavior to preserve
 
@@ -17,6 +17,7 @@ The source build identifies itself as `12.0.2+ryan.3`. That build-metadata suffi
 - `len` and `str.len` retain their existing UTF-8 byte count for strings. Use `byte_len` for an explicit byte count and `char_len` for Unicode scalar values, not user-perceived grapheme clusters; both are also available under `str`.
 - Ordinary double-quoted strings accept only `\\`, `\"`, `\n`, `\r` and `\t` escapes. Unknown escapes and unclosed strings are parse errors before evaluation. Ordinary single-quote interpolation is unchanged. Raw `r"..."` and hash-delimited raw literals preserve their contents without escapes, interpolation, newline conversion or Unicode normalization. Generated Bash, Zsh and PowerShell literals use one source encoder, including a non-interpolating fallback when all raw delimiters collide with the text.
 - `proc_run` accepts an argv array and explicit encoding options, retains base64 bytes, and reports process, decoding and output-completeness facts independently. It is execution-gated, inherits DSH file restrictions, and does not alter legacy `sh` output. Use explicit encodings rather than locale or codepage guesses. [Process execution](docs/api/PROCESS_RUN.md) owns its result fields and bounds.
+- `file_read_text` provides bounded raw-byte snapshots with strict named encodings or BOM-selected decoding; its explicit BOM policy must not silently guess, replace malformed text or normalize newlines. `file_write_verified` encodes a String, publishes through an exclusive sibling temporary file, and rereads the target before reporting verification. Failed post-write verification reports the write honestly and never rolls back a concurrent writer. Digest preconditions are checks, not cross-process compare-and-swap. Legacy write/append/patch semantics stay unchanged and discovery states their weaker guarantees. [File text I/O](docs/api/FILE_TEXT_IO.md) owns the options and result fields.
 - Native CLI, Agent API, and in-memory `sess_*` session behavior remain available for the DSH adapter. Interpreter sessions are live processes, not checkpointed or replayed commands.
 
 ## Build and validation
@@ -25,8 +26,9 @@ Use a Windows x64 Visual Studio Developer PowerShell or an equivalent MSVC build
 
 ```powershell
 cargo build --release --bins --locked -j 6
-cargo test --release --locked --test fork_string_literals --test fork_transpiler_string_fidelity --test fork_process_run --test fork_agent_string_discovery --test fork_process_policy --test fork_typed_agent_api --test sessions --test guard_enforcement --test module_aliases --test effect_snapshot --test book_builtins_are_real --test documented_builtin_count -j 6
-cargo test --release --locked --lib process_run::tests -j 6
+cargo test --release --locked --test fork_file_read_text --test fork_file_write_verified --test fork_file_discovery --test fork_typed_agent_api --test sessions --test guard_enforcement --test module_aliases --test effect_snapshot --test effect_alias_agreement --test book_builtins_are_real --test documented_builtin_count -j 6
+cargo test --release --locked --lib file_read_text::tests -j 6
+cargo test --release --locked --lib file_write_verified::tests -j 6
 cargo test --release --locked --test declared_signatures a_self_contained_example_produces_the_result_it_claims -j 6
 pwsh -NoProfile -File scripts/verify-dsh-compat.ps1 -Executable ./target/release/ae.exe
 ```

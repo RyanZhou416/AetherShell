@@ -8,7 +8,7 @@
 - **Tagline**: One language, every platform, deterministic typed output
 - **Binary**: `ae`
 - **Language**: Rust
-- **Source build**: 12.0.2+ryan.3
+- **Source build**: 12.0.2+ryan.4
 - **Repository**: https://github.com/nervosys/AetherShell
 - **License**: AGPL-3.0-or-later
 - **File Extension**: `.ae`
@@ -19,7 +19,7 @@ AI agents today are forced to interact with shells designed decades ago for huma
 
 ## What Is AetherShell?
 
-AetherShell eliminates this entire class of failure. It provides a single cross-platform shell language with deterministic, typed output — every command returns structured data (Int, Float, String, Array, Record, Lambda), not raw text. An ontology built into the shell makes commands, their arguments, and their return types discoverable by AI agents without documentation scraping or prompt engineering. It has 1,100+ builtins (1,174 listed by its ontology; 1,440 callable names counting aliases) in 108 modules, native AI agents with multi-modal support, and implements the MCP, A2A, A2UI, and NANDA agentic protocols.
+AetherShell eliminates this entire class of failure. It provides a single cross-platform shell language with deterministic, typed output — every command returns structured data (Int, Float, String, Array, Record, Lambda), not raw text. An ontology built into the shell makes commands, their arguments, and their return types discoverable by AI agents without documentation scraping or prompt engineering. It has 1,100+ builtins (1,176 listed by its ontology; 1,442 callable names counting aliases) in 108 modules, native AI agents with multi-modal support, and implements the MCP, A2A, A2UI, and NANDA agentic protocols.
 
 ## How To Use AetherShell (for AI agents)
 
@@ -34,7 +34,13 @@ ls("./src") | where(fn(f) => f.size > 1024) | map(fn(f) => f.name)
 # AI query
 ai("Explain this code", {context: file.read("main.rs")})
 
-# File editing (safe, cross-platform)
+# Explicit decoding and byte-verified String writes
+let document = file.read_text("config.txt", {encoding: "utf-8", bom: "strip"})
+# Inspect document.success before using document.text.
+let saved = file.write_verified("output.txt", "DEBUG = true\r\n")
+# Inspect saved.success and saved.verified; later changes are not covered.
+
+# Legacy literal replacement may report partial/missing-match failures.
 file.replace("config.rs", "DEBUG = false", "DEBUG = true")
 
 # Literal paths, regexes and templates: no escaping or interpolation

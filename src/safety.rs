@@ -1017,7 +1017,7 @@ fn classified_effect(name: &str) -> Option<Effect> {
         // `file_mkdir` is the same dispatch index as `mkdir`; without it the
         // `file_*` prefix rule below claimed the directory-creating spelling only
         // read. `tests/effect_alias_agreement.rs` is what noticed.
-        "file_write" | "file_append" | "file_copy" | "mkdir" | "mkdirp" | "file_mkdir" | "touch"
+        "file_write" | "file_write_verified" | "file_append" | "file_replace" | "file_copy" | "mkdir" | "mkdirp" | "file_mkdir" | "touch"
         // `file_edit`, `file_insert` and `file_patch` read a file, change it and
         // write it back — the `file_*` prefix rule below saw only the read. The
         // jail keys on `WriteLocal`, so all three modified files anywhere on disk
@@ -1054,7 +1054,7 @@ fn classified_effect(name: &str) -> Option<Effect> {
         "platform_db_list" | "platform_db_load" | "platform_has_gui" | "platform_shell_type" |
         "project_dependencies" | "project_dev_dependencies" | "project_gitignore" | "project_languages" |
         "project_license" | "project_name" | "project_readme" | "project_size" |
-        "plan_diff" | "project_structure" | "project_test_files" | "read_text"
+        "plan_diff" | "project_structure" | "project_test_files" | "read_text" | "file_read_text"
         | "refactor_organize_imports" |
         "ssh_config" | "tail" | "wc" => Some(Effect::ReadLocal),
         n if n.starts_with("file_") || n.starts_with("proc_") || n.starts_with("sys_") => {
@@ -4098,7 +4098,9 @@ pub const SELF_GUARDED: &[&str] = &[
     "file_mkdir",
     "file_move",
     "file_patch",
+    "file_replace",
     "file_write",
+    "file_write_verified",
     "gui_screenshot",
     "gzip_compress",
     "gzip_decompress",

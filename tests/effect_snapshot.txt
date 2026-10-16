@@ -408,10 +408,12 @@ file_insert	WriteLocal
 file_mkdir	WriteLocal
 file_move	Destructive
 file_patch	WriteLocal
+file_read_text	ReadLocal
 file_rename	Destructive
-file_replace	ReadLocal
+file_replace	WriteLocal
 file_type	ReadLocal
 file_write	WriteLocal
+file_write_verified	WriteLocal
 find	Pure
 finetune_cancel	Pure
 finetune_list	Pure
@@ -1203,7 +1205,7 @@ startup_list	ReadLocal
 stat	ReadLocal
 status_bar	Pure
 str	Pure
-str_replace_in_file	ReadLocal
+str_replace_in_file	WriteLocal
 strace	Exec
 strace_cmd	Exec
 strings	ReadLocal
@@ -1287,7 +1289,7 @@ test_skipped	Pure
 test_snapshot	Pure
 test_watch	Pure
 text_edit	WriteLocal
-text_replace	ReadLocal
+text_replace	WriteLocal
 text_write	WriteLocal
 themes	Pure
 time	Pure

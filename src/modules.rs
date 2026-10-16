@@ -131,7 +131,9 @@ pub fn fs_module() -> Value {
 pub fn file_module() -> Value {
     module(&[
         ("read", "cat"),
+        ("read_text", "file_read_text"),
         ("write", "file_write"),
+        ("write_verified", "file_write_verified"),
         ("append", "file_append"),
         ("exists", "file_exists"),
         ("patch", "file_patch"),

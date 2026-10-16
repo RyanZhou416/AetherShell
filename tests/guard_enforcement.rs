@@ -19,6 +19,7 @@ fn lock() -> std::sync::MutexGuard<'static, ()> {
 
 const SOURCE: &str = include_str!("../src/builtins.rs");
 const PROCESS_RUN_SOURCE: &str = include_str!("../src/process_run.rs");
+const FILE_WRITE_VERIFIED_SOURCE: &str = include_str!("../src/file_write_verified.rs");
 
 /// Extract `fn bi_<name>` bodies by brace matching — the same evidence-reading
 /// approach as `tests/effect_ratchet.rs`, for the same reason: a list derived
@@ -92,13 +93,30 @@ fn function_bodies(source: &str, prefix: &str) -> Vec<(String, String)> {
 
 fn builtin_bodies() -> Vec<(String, String)> {
     let mut bodies = function_bodies(SOURCE, "bi_");
-    for (_, body) in &mut bodies {
-        if body.contains("crate::process_run::run(") {
-            *body = function_bodies(PROCESS_RUN_SOURCE, "")
-                .into_iter()
-                .find(|(name, _)| name == "run")
-                .expect("the delegated process runner must exist")
-                .1;
+    let patch_body = bodies
+        .iter()
+        .find(|(name, _)| name == "file_patch")
+        .expect("file_patch implementation")
+        .1
+        .clone();
+    for (name, body) in &mut bodies {
+        for (marker, source) in [
+            ("crate::process_run::run(", PROCESS_RUN_SOURCE),
+            (
+                "crate::file_write_verified::run(",
+                FILE_WRITE_VERIFIED_SOURCE,
+            ),
+        ] {
+            if body.contains(marker) {
+                *body = function_bodies(source, "")
+                    .into_iter()
+                    .find(|(name, _)| name == "run")
+                    .expect("the delegated guarded implementation must exist")
+                    .1;
+            }
+        }
+        if name == "file_replace" && body.contains("bi_file_patch(") {
+            *body = patch_body.clone();
         }
     }
     bodies
