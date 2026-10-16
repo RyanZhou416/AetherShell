@@ -283,7 +283,7 @@ pub static SIGNATURES: &[Signature] = &[
             "an array to aggregate, or two numbers",
         )],
         returns: "Number",
-        doc: "Largest element of an array, or the larger of two numbers.",
+        doc: "Largest numeric element of a non-empty array, or the larger of two numbers. All-Int arrays retain exact i64 values without conversion through Float; mixed numeric arrays use Float semantics.",
         examples: &[("[1, 5, 3] | max", "5"), ("max(2, 9)", "9")],
     },
     Signature {
@@ -298,7 +298,7 @@ pub static SIGNATURES: &[Signature] = &[
             "an array to aggregate, or two numbers",
         )],
         returns: "Number",
-        doc: "Smallest element of an array, or the smaller of two numbers.",
+        doc: "Smallest numeric element of a non-empty array, or the smaller of two numbers. All-Int arrays retain exact i64 values without conversion through Float; mixed numeric arrays use Float semantics.",
         examples: &[("[1, 5, 3] | min", "1"), ("min(2, 9)", "2")],
     },
     Signature {
@@ -489,7 +489,7 @@ pub static SIGNATURES: &[Signature] = &[
         // a Haiku run returned the whole `{Count, Group, Name}` record: the
         // right fact in a form nobody asked for. The idiom that answers it is
         // named here rather than left to be discovered.
-        doc: r#"Group records by a field, returning {Name, Count, Group} records. For "which, and how many": | sort_by("Count", "desc") | first | fn(g) => "${g.Name} ${g.Count}"."#,
+        doc: r#"Group records by a field, returning {Name, Count, Group} records. Group identity uses full typed values, not abbreviated display labels: numeric 1 and String "1", or different records/arrays, remain distinct. Name is only a display label and need not uniquely identify a group. For "which, and how many": | sort_by("Count", "desc") | first | fn(g) => "${g.Name} ${g.Count}"."#,
         examples: &[
             (
                 r#"[{user: "a"}, {user: "a"}, {user: "b"}] | group_by("user") | len"#,
@@ -2913,7 +2913,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Any),
         params: &[],
         returns: "String",
-        doc: "A value as compact JSON. A null is the JSON literal null, not the string \"null\".",
+        doc: "A value as compact JSON. A null is the JSON literal null, not the string \"null\". Non-finite Float values serialize as JSON null, including inside arrays and records; they are never changed to numeric zero.",
         examples: &[
             (r#"json_stringify({a: 1})"#, r#"{"a":1}"#),
             (r#"json_stringify(null)"#, "null"),
@@ -5986,7 +5986,7 @@ pub static SIGNATURES: &[Signature] = &[
             req("new_text", Ty::Str, "literal replacement text"),
         ],
         returns: "Record",
-        doc: "Replace every literal old_text occurrence through file_patch. Returns {path, applied, failed, success, patches_applied, patches_failed}; inspect success and failed even when the Agent API envelope succeeds. No match is a reported patch failure, not a thrown builtin error. Operates on strict UTF-8 and keeps newline sequences except those explicitly replaced. No independent post-write readback or concurrent-writer protection is performed.",
+        doc: "Replace every literal old_text occurrence through file_patch. Returns {path, applied, failed, success, patches_applied, patches_failed}; inspect success and failed even when the Agent API envelope succeeds. No match or an empty old_text is a reported patch failure, not a thrown builtin error. Whitespace-only old_text remains a literal pattern. Operates on strict UTF-8 and keeps newline sequences except those explicitly replaced. No independent post-write readback or concurrent-writer protection is performed.",
         examples: &[(r#"try { file_replace(123, "old", "new") } catch e { e.error.code }"#, "E_BAD_ARG")],
     },
     Signature {
@@ -6004,7 +6004,7 @@ pub static SIGNATURES: &[Signature] = &[
             ),
         ],
         returns: "Record",
-        doc: "Apply find/replace records to `path` and write it back, returning {path, applied, failed, success, patches_applied, patches_failed}: `file_patch(\"config.txt\", [{find: \"DEBUG=0\", replace: \"DEBUG=1\"}])`. The patches are one {find, replace} record or an array of them, passed positionally or piped; a record may use old/search and new/with instead of find/replace. Patches are processed in order; valid patches may be written even when other patches fail. Inspect success and failed: a successful Agent API envelope does not mean every patch matched. No independent readback or concurrent-writer protection is performed. The examples stop at argument validation and write nothing.",
+        doc: "Apply find/replace records to `path` and write it back, returning {path, applied, failed, success, patches_applied, patches_failed}: `file_patch(\"config.txt\", [{find: \"DEBUG=0\", replace: \"DEBUG=1\"}])`. The patches are one {find, replace} record or an array of them, passed positionally or piped; a record may use old/search and new/with instead of find/replace. An empty find string is a per-patch failure, not insertion between every character; whitespace-only literal patterns remain valid. Patches are processed in order; valid patches may be written even when other patches fail. Inspect success and failed: a successful Agent API envelope does not mean every patch matched. No independent readback or concurrent-writer protection is performed. The examples stop at argument validation and write nothing.",
         examples: &[
             (r#"try { file_patch(123) } catch e { e.error.code }"#, "E_BAD_ARG"),
             (

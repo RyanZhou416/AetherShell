@@ -1,6 +1,7 @@
 use crate::ast::{BinOp, CfgCondition, Expr, Stmt, UnOp, Visibility};
 use crate::builtins;
 use crate::env::Env;
+use crate::interpolation::{parse_template, Segment};
 use crate::value::{AsyncLambda, Future, Lambda, Value};
 use anyhow::Result;
 use std::collections::BTreeMap;
@@ -1792,68 +1793,26 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
     })
 }
 
-/// Interpolate ${expr} patterns in a string
+/// Interpolate the `${expr}` holes of a string literal.
+///
+/// The template is parsed in full before any hole is evaluated, so a hole that
+/// does not parse refuses the literal before the holes written before it run. A
+/// hole that fails at runtime propagates its own failure, untouched: the code
+/// an agent branches on is the code the same expression carries outside a hole.
 fn interpolate_string(s: &str, env: &mut Env) -> Result<Value> {
+    let template = parse_template(s)?;
     let mut result = String::new();
-    let mut chars = s.chars().peekable();
 
-    while let Some(ch) = chars.next() {
-        if ch == '$' && chars.peek() == Some(&'{') {
-            chars.next(); // consume '{'
-
-            // Find the closing '}'
-            let mut expr_str = String::new();
-            let mut depth = 1;
-            for ch in chars.by_ref() {
-                if ch == '{' {
-                    depth += 1;
-                    expr_str.push(ch);
-                } else if ch == '}' {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                    expr_str.push(ch);
-                } else {
-                    expr_str.push(ch);
-                }
+    for segment in &template.segments {
+        match segment {
+            Segment::Literal(text) => result.push_str(text),
+            // `to_display_string` renders every variant the way a user wrote
+            // it. The fallback here used to be `format!("{:?}", other)`, so
+            // interpolating an array or a record printed Rust's Debug —
+            // `"x: ${r}"` came out as `x: Record({"a": Int(1)})`.
+            Segment::Expression(expr) => {
+                result.push_str(&eval_expr(expr, env)?.to_display_string())
             }
-
-            // Parse and evaluate the expression
-            match crate::parser::parse_program(&expr_str) {
-                Ok(stmts) if !stmts.is_empty() => {
-                    if let crate::ast::Stmt::Expr(expr) = &stmts[0] {
-                        match eval_expr(expr, env) {
-                            Ok(val) => {
-                                // `to_display_string` renders every variant the
-                                // way a user wrote it. The fallback here used to
-                                // be `format!("{:?}", other)`, so interpolating
-                                // an array or a record printed Rust's Debug —
-                                // `"x: ${r}"` came out as
-                                // `x: Record({"a": Int(1)})`.
-                                result.push_str(&val.to_display_string());
-                            }
-                            Err(e) => {
-                                // On error, keep the ${expr} literal
-                                result.push_str(&format!("${{{}}} [error: {}]", expr_str, e));
-                            }
-                        }
-                    } else {
-                        result.push_str(&format!("${{{}}}", expr_str));
-                    }
-                }
-                _ => {
-                    // A hole that does not parse is reported the same way one
-                    // that fails to evaluate is. Keeping the literal silently
-                    // meant `"${msg.from}"` — invalid because `from` is a
-                    // keyword — printed itself verbatim, which reads as a
-                    // successful interpolation of a string that happens to look
-                    // like one.
-                    result.push_str(&format!("${{{}}} [error: does not parse]", expr_str));
-                }
-            }
-        } else {
-            result.push(ch);
         }
     }
 

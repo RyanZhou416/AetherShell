@@ -1224,7 +1224,7 @@ fn get_type_definitions() -> Vec<TypeDefinition> {
         },
         TypeDefinition {
             name: "String".to_string(),
-            description: "UTF-8 text. Ordinary quotes interpolate ${...}; raw r\"...\" and hash-delimited literals do not interpret escapes or interpolation. Unknown double-quote escapes and missing closing quotes are parse errors.".to_string(),
+            description: "UTF-8 text. Ordinary quotes interpolate ${...}; raw r\"...\" and hash-delimited literals do not interpret escapes or interpolation. Unknown double-quote escapes and missing closing quotes are parse errors. Interpolation holes require exactly one expression and a closing brace; syntax and evaluation errors fail the operation instead of becoming successful text.".to_string(),
             json_equivalent: "string".to_string(),
             examples: vec!["\"hello\"".to_string(), "\"multi\\nline\"".to_string(), r#"r"C:\temp\new""#.to_string()],
             fields: None,

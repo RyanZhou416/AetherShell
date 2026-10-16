@@ -84,12 +84,22 @@ fn the_ordinary_form_still_interpolates() {
 }
 
 #[test]
-fn an_interpolation_that_fails_still_reports_but_the_raw_form_never_tries() {
-    // Non-vacuity: the ordinary form is not a no-op either way, and the raw
-    // form does not pick up the error note.
+fn an_interpolation_that_fails_now_refuses_and_the_raw_form_never_tries() {
+    // The raw form has no hole to evaluate, so it is unchanged text.
     assert_eq!(text(r#"r"${1/0}""#), "${1/0}");
-    let interpolated = text(r#""${1/0}""#);
-    assert_ne!(interpolated, "${1/0}", "ordinary interpolation did nothing");
+
+    // The ordinary form used to substitute `${1/0} [error: …]` into the
+    // result, which reads as a successful interpolation of a string that looks
+    // like a failure. The hole's own failure now reaches the caller with the
+    // code the same expression carries outside a hole.
+    let stmts = parse_program(r#""${1/0}""#).expect("the literal itself parses");
+    let e = aethershell::eval::eval_program(&stmts, &mut aethershell::env::Env::new())
+        .expect_err("a hole that fails must refuse the literal");
+    let se = e
+        .downcast_ref::<aethershell::safety::SafetyError>()
+        .unwrap_or_else(|| panic!("not a structured failure: {e}"));
+    assert_eq!(se.code.as_str(), "E_BAD_ARG", "{}", se.message);
+    assert!(se.message.contains("division by zero"), "{}", se.message);
 }
 
 #[test]

@@ -111,6 +111,8 @@ pub mod value;
 pub mod yaml;
 
 // Core modules available in both native and WASM builds
+/// String interpolation — the shared `${...}` template scanner.
+pub mod interpolation;
 /// Shell feature flags — runtime capability detection.
 pub mod shell_features;
 /// Type checker — Hindley-Milner type inference engine.

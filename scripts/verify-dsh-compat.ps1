@@ -249,7 +249,11 @@ try {
         @{ Id = 'A2'; Name = 'sort-ascending'; Code = '[3, 1, 2] | sort'; Want = '[1,2,3]' },
         @{ Id = 'A3'; Name = 'sort-reverse-flag'; Code = '[3, 1, 2] | sort("-r")'; Want = '[3,2,1]' },
         @{ Id = 'A4'; Name = 'json-null-roundtrip-nested'; Code = 'json_parse(json_stringify({a: None, nested: [None]}))'; Want = '{"a":null,"nested":[null]}' },
-        @{ Id = 'A7'; Name = 'raw-path-and-template'; Code = 'r"C:\temp\new ${1+2}"'; Want = '"C:\\temp\\new ${1+2}"' }
+        @{ Id = 'A7'; Name = 'raw-path-and-template'; Code = 'r"C:\temp\new ${1+2}"'; Want = '"C:\\temp\\new ${1+2}"' },
+        @{ Id = 'A13'; Name = 'integer-extrema-preserve-precision'; Code = 'max([9007199254740993,9007199254740992])'; Want = '9007199254740993' },
+        @{ Id = 'A14'; Name = 'structured-group-keys-stay-distinct'; Code = '[{k:[1,2]},{k:[3,4]}] | group_by("k") | len'; Want = '2' },
+        @{ Id = 'A15'; Name = 'nonfinite-json-is-null-not-zero'; Code = '[] | avg | json_stringify'; Want = '"null"' },
+        @{ Id = 'A16'; Name = 'unicode-type-preview-does-not-panic'; Code = 'type_fields({x:"中中中中中中中中中中中中中中中中中"}) | len'; Want = '1' }
     )
     foreach ($expression in $expressions) {
         $run = Invoke-Ae -Arguments @('--deterministic', '-c', $expression.Code)
@@ -274,11 +278,16 @@ try {
     [Console]::Error.WriteLine('')
     foreach ($invalid in @(
         @{ Id = 'A8'; Name = 'unknown-escape-is-a-parse-error'; Code = '"\q"' },
-        @{ Id = 'A9'; Name = 'unclosed-string-is-a-parse-error'; Code = '"abc' }
+        @{ Id = 'A9'; Name = 'unclosed-string-is-a-parse-error'; Code = '"abc' },
+        @{ Id = 'A10'; Name = 'unclosed-interpolation-is-a-parse-error'; Code = '"answer ${1+2"' },
+        @{ Id = 'A11'; Name = 'malformed-interpolation-is-a-parse-error'; Code = '"answer ${1+}"' }
     )) {
         $run = Invoke-Ae -Arguments @('--deterministic', '-c', $invalid.Code)
         Add-Result $invalid.Id $invalid.Name ((-not $run.TimedOut) -and ($run.ExitCode -ne 0) -and ($run.Err -match 'E_PARSE')) "exit=$($run.ExitCode)"
     }
+    $interpolationError = Invoke-Ae -Arguments @('--deterministic', '-c', '"answer ${1/0}"')
+    Add-Result 'A12' 'interpolation-runtime-error-propagates' `
+        ((-not $interpolationError.TimedOut) -and ($interpolationError.ExitCode -ne 0) -and ($interpolationError.Err -match 'E_BAD_ARG')) "exit=$($interpolationError.ExitCode)"
     [Console]::Error.WriteLine('--- ae agent execute ---')
 
     $fileIoPath = Join-Path $script:Temp 'verified-中文.txt'
@@ -391,7 +400,7 @@ try {
         }
     }
 
-    $expectedIds = @('A1','A2','A3','A4','A5','A6','A7','A8','A9','B1','B2','B3','B4','B5','B6','B7','B8','B9','B10','B11','S1','S2','S3','S4','S5','S6')
+    $expectedIds = @('A1','A2','A3','A4','A5','A6','A7','A8','A9','A10','A11','A12','A13','A14','A15','A16','B1','B2','B3','B4','B5','B6','B7','B8','B9','B10','B11','S1','S2','S3','S4','S5','S6')
     $actualIds = @($script:Checks | ForEach-Object { $_.id })
     if ($actualIds.Count -ne $expectedIds.Count -or @(Compare-Object $expectedIds $actualIds).Count -ne 0) {
         Add-Result 'Z0' 'all-required-checks-ran' $false "expected $($expectedIds.Count) checks; observed $($actualIds.Count)"

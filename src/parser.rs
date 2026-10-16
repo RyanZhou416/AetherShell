@@ -272,7 +272,11 @@ pub fn parse_program_strict(src: &str) -> Result<Vec<Stmt>> {
 /// `r"..."` through 16 hashes. The cap exists so a pathological run cannot turn
 /// the closing scan into a search; 16 is far past what any generated JSON,
 /// Windows path or regex needs.
-const MAX_RAW_HASHES: usize = 16;
+///
+/// `crate::interpolation` reads this constant too: a hole's text is scanned
+/// before it is parsed, and the scan has to agree with the lexer about where a
+/// raw literal ends.
+pub(crate) const MAX_RAW_HASHES: usize = 16;
 
 fn lex(src: &str) -> Result<Vec<Spanned>, ParseError> {
     let mut out = Vec::<Spanned>::new();

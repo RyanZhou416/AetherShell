@@ -13,6 +13,9 @@ use crate::{env::Env, parser::parse_program, value::Value};
 use crate::ast::{BinOp, Expr, Pattern, Stmt, UnOp};
 
 #[cfg(feature = "web")]
+use crate::interpolation::{parse_template, Segment};
+
+#[cfg(feature = "web")]
 use crate::value::Lambda;
 
 #[cfg(feature = "web")]
@@ -510,32 +513,18 @@ fn match_pattern(pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)
 
 #[cfg(feature = "web")]
 fn interpolate_string(s: &str, env: &mut Env) -> Result<String, String> {
+    // The same scan as the native evaluator: a hole ends at its own `}`, not at
+    // the first `}` that happens to come after a `{`.
+    let template = parse_template(s).map_err(|e| e.to_string())?;
     let mut result = String::new();
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '$' && chars.peek() == Some(&'{') {
-            chars.next();
-            let mut expr_str = String::new();
-            let mut depth = 1;
-            while let Some(c) = chars.next() {
-                if c == '{' {
-                    depth += 1;
-                } else if c == '}' {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                expr_str.push(c);
+    for segment in &template.segments {
+        match segment {
+            Segment::Literal(text) => result.push_str(text),
+            // A failure inside a hole is this evaluator's own failure, reported
+            // the way every other failure here is.
+            Segment::Expression(expr) => {
+                result.push_str(&format_value(&eval_expr_wasm(expr, env)?))
             }
-            let stmts =
-                parse_program(&expr_str).map_err(|e| format!("interpolation error: {}", e))?;
-            if let Some(Stmt::Expr(e)) = stmts.first() {
-                let val = eval_expr_wasm(e, env)?;
-                result.push_str(&format_value(&val));
-            }
-        } else {
-            result.push(c);
         }
     }
     Ok(result)

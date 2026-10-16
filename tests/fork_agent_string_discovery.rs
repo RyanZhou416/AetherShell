@@ -28,6 +28,8 @@ fn string_type_examples_include_a_raw_literal_that_evaluates_verbatim() {
         .find(|kind| kind.name == "String")
         .expect("String type");
     assert!(string.description.contains("raw"));
+    assert!(string.description.contains("exactly one expression"));
+    assert!(string.description.contains("errors fail the operation"));
     let raw = string
         .examples
         .iter()

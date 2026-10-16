@@ -8,7 +8,7 @@
 - **Tagline**: One language, every platform, deterministic typed output
 - **Binary**: `ae`
 - **Language**: Rust
-- **Source build**: 12.0.2+ryan.4
+- **Source build**: 12.0.2+ryan.5
 - **Repository**: https://github.com/nervosys/AetherShell
 - **License**: AGPL-3.0-or-later
 - **File Extension**: `.ae`
@@ -51,7 +51,7 @@ let template = r#"Hello ${name}, say "hello"."#
 proc_run(["git", "--version"], {encoding: "utf-8"})
 ```
 
-Use raw strings for opaque text. Ordinary double quotes interpret `\\`, `\"`, `\n`, `\r` and `\t`; an unknown escape or missing closing quote is an error. Ordinary single quotes preserve backslashes but still interpolate `${...}`. `proc_run` keeps output bytes as base64 and reports decoding separately from process success; use `encoding: "bytes"` to avoid decoding. [Process execution](docs/api/PROCESS_RUN.md) documents bounds and result fields.
+Use raw strings for opaque text. Ordinary interpolation holes require exactly one expression and a closing brace; syntax or evaluation failures fail the operation rather than becoming successful error text. Ordinary double quotes interpret `\\`, `\"`, `\n`, `\r` and `\t`; an unknown escape or missing closing quote is an error. Ordinary single quotes preserve backslashes but still interpolate `${...}`. `proc_run` keeps output bytes as base64 and reports decoding separately from process success; use `encoding: "bytes"` to avoid decoding. [Process execution](docs/api/PROCESS_RUN.md) documents bounds and result fields.
 
 ### Option 2: Call the Agent API (HTTP)
 

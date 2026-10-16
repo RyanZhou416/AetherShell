@@ -8901,18 +8901,24 @@ fn bi_group_object(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
     match input {
         Value::Array(arr) => {
-            let mut groups = BTreeMap::new();
+            // Identity (`{:?}`) keys the group, matching `unique`; the display
+            // form leads so `Name` is unchanged and String keys keep their
+            // order. The display form alone collides: `{…}`, `[len=N]`, and
+            // `1` with `"1"`.
+            let mut groups: BTreeMap<(String, String), Vec<Value>> = BTreeMap::new();
 
             for item in arr {
                 let key = get_property_value(&item, property);
-                let key_str = value_to_string(&key);
-                groups.entry(key_str).or_insert_with(Vec::new).push(item);
+                groups
+                    .entry((value_to_string(&key), format!("{key:?}")))
+                    .or_default()
+                    .push(item);
             }
 
             let mut result = Vec::new();
-            for (key, items) in groups {
+            for ((name, _identity), items) in groups {
                 let mut group = BTreeMap::new();
-                group.insert("Name".to_string(), Value::Str(key));
+                group.insert("Name".to_string(), Value::Str(name));
                 group.insert("Count".to_string(), Value::Int(items.len() as i64));
                 group.insert("Group".to_string(), Value::Array(items));
                 result.push(Value::Record(group));
@@ -9099,9 +9105,9 @@ fn value_to_json(value: Value) -> serde_json::Value {
         Value::Null => serde_json::Value::Null,
         Value::Str(s) => serde_json::Value::String(s),
         Value::Int(i) => serde_json::Value::Number(serde_json::Number::from(i)),
-        Value::Float(f) => serde_json::Value::Number(
-            serde_json::Number::from_f64(f).unwrap_or_else(|| serde_json::Number::from(0)),
-        ),
+        Value::Float(f) => serde_json::Number::from_f64(f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
         Value::Bool(b) => serde_json::Value::Bool(b),
         Value::Array(arr) => serde_json::Value::Array(arr.into_iter().map(value_to_json).collect()),
         Value::Record(map) => {
@@ -10930,9 +10936,12 @@ fn bi_type_fields(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                     let mut r = std::collections::BTreeMap::new();
                     r.insert("name".to_string(), Value::Str(name.clone()));
                     r.insert("type".to_string(), Value::Str(detailed_type_name(value)));
-                    // Brief preview of value
+                    // Preview limits count Unicode scalars, not bytes.
                     let preview = match value {
-                        Value::Str(s) if s.len() > 50 => format!("\"{}…\"", &s[..50]),
+                        Value::Str(s) if s.chars().nth(50).is_some() => {
+                            let head: String = s.chars().take(50).collect();
+                            format!("\"{head}…\"")
+                        }
                         Value::Array(a) => format!("[…] ({} items)", a.len()),
                         Value::Record(r) => format!("{{…}} ({} fields)", r.len()),
                         other => format!("{}", other),
@@ -12568,6 +12577,22 @@ fn fold_extremum(items: &[Value], want_max: bool) -> Result<Value> {
     // not `5.0`: an agent comparing the answer to a literal should not have to
     // know whether the aggregate silently promoted.
     let all_int = items.iter().all(|v| matches!(v, Value::Int(_)));
+    // Compare integers as integers: `f64` rounds every value past 2^53, and
+    // this aggregate must agree with the two-number form.
+    if all_int {
+        let mut best: Option<i64> = None;
+        for v in items {
+            let Value::Int(i) = v else {
+                unreachable!("all_int checked every element")
+            };
+            best = Some(match best {
+                None => *i,
+                Some(b) if want_max => b.max(*i),
+                Some(b) => b.min(*i),
+            });
+        }
+        return Ok(Value::Int(best.expect("non-empty array yields a value")));
+    }
     let mut best: Option<f64> = None;
     for v in items {
         let n = match v {
@@ -12588,11 +12613,7 @@ fn fold_extremum(items: &[Value], want_max: bool) -> Result<Value> {
         });
     }
     let b = best.expect("non-empty array yields a value");
-    Ok(if all_int {
-        Value::Int(b as i64)
-    } else {
-        Value::Float(b)
-    })
+    Ok(Value::Float(b))
 }
 
 fn bi_min(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
@@ -34357,6 +34378,13 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             }
         };
 
+        // An empty needle is not a literal: `replace("", x)` interleaves `x`
+        // between every character. A whitespace needle stays a literal.
+        if find_str.is_empty() {
+            failed.push(Value::Str(format!("patch {}: empty 'find' string", i)));
+            continue;
+        }
+
         let replace_str = match record
             .get("replace")
             .or(record.get("new"))
@@ -34379,22 +34407,23 @@ fn bi_file_patch(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
             patch_result.insert("count".to_string(), Value::Int(count as i64));
             applied.push(Value::Record(patch_result));
         } else {
-            failed.push(Value::Str(format!(
-                "patch {}: '{}' not found",
-                i,
-                if find_str.len() > 40 {
-                    format!("{}...", &find_str[..40])
-                } else {
-                    find_str
-                }
-            )));
+            // Scalar cap, as in the `type_fields` preview; suffix stays `...`.
+            let shown: String = if find_str.chars().nth(40).is_some() {
+                find_str.chars().take(40).collect::<String>() + "..."
+            } else {
+                find_str
+            };
+            failed.push(Value::Str(format!("patch {}: '{}' not found", i, shown)));
         }
     }
 
-    // Write back atomically
-    let temp_path = format!("{}.aether_tmp", path);
-    fs::write(&temp_path, &content)?;
-    fs::rename(&temp_path, &path)?;
+    // Write back only when something changed: an all-failed list must leave
+    // the target untouched.
+    if !applied.is_empty() {
+        let temp_path = format!("{}.aether_tmp", path);
+        fs::write(&temp_path, &content)?;
+        fs::rename(&temp_path, &path)?;
+    }
 
     let mut result = BTreeMap::new();
     result.insert("path".to_string(), Value::Str(path));

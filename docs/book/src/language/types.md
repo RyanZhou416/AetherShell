@@ -42,7 +42,7 @@ let greeting = "Hello, ${name}!"    # => "Hello, world!"
 let math = "2 + 2 = ${2 + 2}"      # => "2 + 2 = 4"
 ```
 
-Double quotes recognize only `\\`, `\"`, `\n`, `\r` and `\t` escapes. An unknown escape, a dangling backslash or a missing closing quote is an `E_PARSE` error; the program is not evaluated. Single quotes preserve backslashes but still interpolate `${...}`; they are not raw strings.
+Double quotes recognize only `\\`, `\"`, `\n`, `\r` and `\t` escapes. An unknown escape, a dangling backslash or a missing closing quote is an `E_PARSE` error; the program is not evaluated. Single quotes preserve backslashes but still interpolate `${...}`; they are not raw strings. Each interpolation hole must contain exactly one expression and a closing brace. All holes in one String are syntax-checked before any hole in that String is evaluated. Syntax and evaluation failures propagate as errors rather than successful text containing an error message. Earlier statements and earlier successful holes can already have effects when an evaluation fails; this is not a transaction.
 
 Use a raw literal for paths, regular expressions, templates or other opaque text. Raw literals produce ordinary String values without backslash escapes or interpolation. Surround the quotes with matching hashes when the content contains quotes; up to 16 hashes are supported.
 
@@ -113,7 +113,9 @@ AetherShell performs automatic numeric promotion in arithmetic:
 | `Int ^ Int` (negative) | `Float` | Float power |
 | `Int / Int` | `Float` | Always float division |
 
-Equality comparison between `Int` and `Float` works via casting.
+Equality comparison between `Int` and `Float` works via casting. All-Int `min` and `max` aggregates keep exact native i64 values; mixed numeric arrays use floating-point semantics. This does not expand the DSH adapter's exact JSON-number range: carry larger opaque identifiers as Strings. Non-finite Float values serialize to JSON null, including inside arrays and records, rather than becoming zero.
+
+`group_by` uses the full typed field value for group identity, independently of its display label. Distinct arrays or records, and numeric `1` versus String `"1"`, remain different groups even when their `Name` labels are identical.
 
 ## Truthiness
 
