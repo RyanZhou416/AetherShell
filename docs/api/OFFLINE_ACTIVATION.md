@@ -2,15 +2,11 @@
 
 This procedure activates native `12.0.2+ryan.3`, adapter `0.1.0-dsh017rc1.5`, and `structuredDataMode: typed-v1` in the existing Web profile. It does not launch a second server or start/restart DSH. The [activation script](../../scripts/activate-dsh-aether.ps1) pins the verified executable and tarball hashes; if a file was rebuilt or replaced, stop and verify the new artifact instead of bypassing the check.
 
-## Prepared Windows launcher workflow
+## Manual installation only
 
-When an activation plan has been prepared for the existing Web profile, the operator only needs to stop the current DSH Host, run [build.cmd](<C:/Project/deepseek-harness/build.cmd>), and then run [run.cmd](<C:/Project/deepseek-harness/run.cmd>). The build remains the normal repository build. The run launcher checks and applies the prepared update before its normal Host launch; Windows may ask for permission to update Program Files. No separate PowerShell command is needed. Do not start DSH elsewhere or close the activation window midway through the update.
+The normal DSH build and run launchers do not install or update AetherShell. They do not consume an activation marker or invoke this installer. Installation is a separate, explicit maintenance action after the operator stops DSH; do not add it to routine startup.
 
-The one-shot plan pins this script's hash and the intended DSH home. Startup refuses a changed script, a still-running Host, an unsupported plan or an activation failure. On success the launcher records completion, so later runs do not reinstall the update. This preparation does not change the currently loaded plugin or interpreter.
-
-## Manual maintenance fallback
-
-The remaining steps are for maintainers running the installer separately, not required for the prepared build/run workflow.
+The script pins native `12.0.2+ryan.3` and adapter `0.1.0-dsh017rc1.5`. A newer source build or candidate executable is not approved for installation by this script; its pinned artifacts require separate verification before an installer update. The following commands are for a planned maintenance window, not a running Host.
 
 ### Before stopping DSH
 
