@@ -9,7 +9,7 @@ Round down to the nearest integer.
 
 ```aethershell
 floor 3.7     # 3
-floor -2.3    # -3
+floor(-2.3)   # -3
 floor 5       # 5 (no-op for Int)
 ```
 
@@ -18,17 +18,17 @@ Round up to the nearest integer.
 
 ```aethershell
 ceil 3.2      # 4
-ceil -2.7     # -2
+ceil(-2.7)    # -2
 ceil 5        # 5 (no-op for Int)
 ```
 
 ### `round`
-Round to the nearest integer (half rounds up).
+Round to the nearest integer; halfway cases round away from zero.
 
 ```aethershell
 round 3.5     # 4
 round 3.4     # 3
-round -2.5    # -2
+round(-2.5)   # -3
 ```
 
 ## Absolute Value
@@ -37,9 +37,9 @@ round -2.5    # -2
 Return the absolute (non-negative) value.
 
 ```aethershell
-abs -42       # 42
+abs(-42)      # 42
 abs 3.14      # 3.14
-abs -99.9     # 99.9
+abs(-99.9)    # 99.9
 ```
 
 ## Powers & Roots

@@ -4,7 +4,7 @@ This fork is maintained at https://github.com/RyanZhou416/AetherShell and starts
 
 ## Runtime identity
 
-The source build identifies itself as `12.0.2+ryan.6`. That build-metadata suffix distinguishes it from the official `12.0.2` precompiled package without claiming a new upstream release. The lockfile pins the process-group dependency and its platform support; `encoding_rs` is already present in the dependency graph. Building this version does not replace an installed interpreter.
+The source build identifies itself as `12.0.2+ryan.7`. That build-metadata suffix distinguishes it from the official `12.0.2` precompiled package without claiming a new upstream release. The lockfile pins the process-group dependency and its platform support; `encoding_rs` is already present in the dependency graph. Building this version does not replace an installed interpreter.
 
 ## Behavior to preserve
 
@@ -23,6 +23,9 @@ The source build identifies itself as `12.0.2+ryan.6`. That build-metadata suffi
 - Explicit JSON text ingestion (`json_parse`, `from_json`, JSON/JSONL `open`, and browser JSON input) refuses integer lexemes outside signed i64 instead of silently deriving a rounded Float. Quoted identifiers stay exact; decimal/exponent forms retain Float semantics. Other infallible internal JSON adapters are not covered by this text-ingestion check.
 - Integer operators and non-negative integer powers use checked i64 arithmetic; overflow is a coded error. Native and browser numeric paths retain exact zero for `i64::MIN % -1` and refuse saturating Float-to-Int conversions. The native mean rejects empty input; native all-Int sums use a wider subtotal so cancellation is valid before checking the final i64 result. Materialized ranges are counted before allocation, bounded at 1,000,000 items and never wrap at integer boundaries.
 - Byte-budget previews share a UTF-8-boundary prefix helper without changing ASCII output or byte limits. Conversation titles, agent/RLM summaries, CLI/TUI previews and malformed audit hashes cannot split a scalar; multibyte word editing keeps cursor character counts separate from byte positions. Credential previews fully mask non-ASCII input. These fixes do not widen file policy or require a Host restart.
+- Source Int literals, integer match patterns and scaled `k`/`K`/`M`/`G` literals must fit signed i64. Invalid literals fail parsing instead of becoming zero or a saturated boundary. A minus following an expression denotes subtraction regardless of whitespace; use parenthesized calls for negative arguments instead of ambiguous word-call syntax.
+- HTTP convenience eval and pipeline routes require correctly typed `code`/`steps` fields before dispatch, including SSE routes. Invalid descriptors retain their error rather than becoming empty pipelines. Explicit empty code and explicit-null pipeline seeds keep their existing behavior; bearer authentication and typed CLI transport are unchanged.
+- File removal with force suppresses only genuine NotFound errors. Environment writes validate names, types and NUL before OS calls; reads distinguish unset from non-Unicode values. Platform-store reads never turn corruption or I/O failure into an empty map, and mutations guard the actual store path before writing. Corrupt stores are not overwritten; this is not a promise of concurrent-writer isolation or transactions.
 - Native CLI, Agent API, and in-memory `sess_*` session behavior remain available for the DSH adapter. Interpreter sessions are live processes, not checkpointed or replayed commands.
 
 ## Build and validation
@@ -31,6 +34,8 @@ Use a Windows x64 Visual Studio Developer PowerShell or an equivalent MSVC build
 
 ```powershell
 cargo build --release --bins --locked -j 6
+cargo test --release --locked --test fork_parser_numeric_literals --test fork_effect_errors --test fork_platform_store_errors -j 6
+cargo test --release --locked --lib request_body_tests -j 6
 cargo test --release --locked --test fork_json_integer_bounds --test fork_numeric_limits --test fork_unicode_boundaries -j 6
 cargo test --release --locked --lib text::tests -j 6
 cargo test --release --locked --lib line_editor::tests -j 6

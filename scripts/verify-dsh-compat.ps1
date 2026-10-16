@@ -258,7 +258,9 @@ try {
         @{ Id = 'A18'; Name = 'integer-sum-cancellation-is-exact'; Code = 'sum([9223372036854775807,1,-1])'; Want = '9223372036854775807' },
         @{ Id = 'A19'; Name = 'quoted-large-identifiers-stay-distinct'; Code = 'json_parse(r#"["18446744073709551615","18446744073709551614"]"#) | unique | len'; Want = '2' },
         @{ Id = 'A20'; Name = 'descending-range-step-is-discoverable'; Code = 'range(5,0,-2)'; Want = '[5,3,1]' },
-        @{ Id = 'A21'; Name = 'piped-power-keeps-base-and-exponent'; Code = '2 | pow(3)'; Want = '8' }
+        @{ Id = 'A21'; Name = 'piped-power-keeps-base-and-exponent'; Code = '2 | pow(3)'; Want = '8' },
+        @{ Id = 'A27'; Name = 'unspaced-subtraction-reaches-assignment'; Code = 'x = 5-3; x'; Want = '2' },
+        @{ Id = 'A32'; Name = 'negative-function-arguments-remain-explicit'; Code = 'abs(-7)'; Want = '7' }
     )
     foreach ($expression in $expressions) {
         $run = Invoke-Ae -Arguments @('--deterministic', '-c', $expression.Code)
@@ -285,7 +287,10 @@ try {
         @{ Id = 'A8'; Name = 'unknown-escape-is-a-parse-error'; Code = '"\q"' },
         @{ Id = 'A9'; Name = 'unclosed-string-is-a-parse-error'; Code = '"abc' },
         @{ Id = 'A10'; Name = 'unclosed-interpolation-is-a-parse-error'; Code = '"answer ${1+2"' },
-        @{ Id = 'A11'; Name = 'malformed-interpolation-is-a-parse-error'; Code = '"answer ${1+}"' }
+        @{ Id = 'A11'; Name = 'malformed-interpolation-is-a-parse-error'; Code = '"answer ${1+}"' },
+        @{ Id = 'A28'; Name = 'source-integer-overflow-is-a-parse-error'; Code = '9223372036854775808' },
+        @{ Id = 'A29'; Name = 'scaled-integer-overflow-is-a-parse-error'; Code = '9223372036854776k' },
+        @{ Id = 'A33'; Name = 'overflowing-match-pattern-is-refused'; Code = 'match 0 { 9223372036854775808 => "wrong", _ => "other" }' }
     )) {
         $run = Invoke-Ae -Arguments @('--deterministic', '-c', $invalid.Code)
         Add-Result $invalid.Id $invalid.Name ((-not $run.TimedOut) -and ($run.ExitCode -ne 0) -and ($run.Err -match 'E_PARSE')) "exit=$($run.ExitCode)"
@@ -298,12 +303,22 @@ try {
         @{Id='A23';Name='out-of-range-json-integer-is-refused';Code='json_parse("18446744073709551615")';ErrorCode='E_BAD_ARG'},
         @{Id='A24';Name='float-to-integer-does-not-saturate';Code='floor(pow(10.0,30.0))';ErrorCode='E_BAD_ARG'},
         @{Id='A25';Name='empty-mean-is-an-error';Code='avg([])';ErrorCode='E_BAD_ARG'},
-        @{Id='A26';Name='materialized-range-has-a-size-budget';Code='range(1000001)';ErrorCode='E_BUDGET_EXCEEDED'}
+        @{Id='A26';Name='materialized-range-has-a-size-budget';Code='range(1000001)';ErrorCode='E_BUDGET_EXCEEDED'},
+        @{Id='A30';Name='invalid-environment-name-is-refused';Code='env_set("", "value")';ErrorCode='E_BAD_ARG'},
+        @{Id='A31';Name='wrong-typed-removal-flag-is-refused';Code='rm("missing-private-file", "yes")';ErrorCode='E_BAD_ARG'},
+        @{Id='A34';Name='invalid-environment-read-is-not-unset';Code='env("", "fallback")';ErrorCode='E_BAD_ARG'}
     )) {
         $run = Invoke-Ae -Arguments @('--deterministic', '-c', $invalidNumber.Code)
         Add-Result $invalidNumber.Id $invalidNumber.Name `
             ((-not $run.TimedOut) -and ($run.ExitCode -ne 0) -and ($run.Err -match $invalidNumber.ErrorCode)) "exit=$($run.ExitCode)"
     }
+    $removalDirectory = Join-Path $script:Temp 'force-directory'
+    $null = New-Item -ItemType Directory -Path $removalDirectory
+    $removalSource = 'rm(' + (ConvertTo-AeLiteral $removalDirectory) + ', true)'
+    $removal = Invoke-Ae -Arguments @('--deterministic', '-c', $removalSource)
+    Add-Result 'A35' 'force-removal-does-not-hide-a-directory-error' `
+        ((-not $removal.TimedOut) -and ($removal.ExitCode -ne 0) -and ($removal.Err -match 'E_POLICY_DENY|E_IO') -and
+         (Test-Path -LiteralPath $removalDirectory -PathType Container)) "exit=$($removal.ExitCode); directoryStillExists=$(Test-Path -LiteralPath $removalDirectory)"
     [Console]::Error.WriteLine('--- ae agent execute ---')
 
     $fileIoPath = Join-Path $script:Temp 'verified-中文.txt'
@@ -416,7 +431,7 @@ try {
         }
     }
 
-    $expectedIds = @('A1','A2','A3','A4','A5','A6','A7','A8','A9','A10','A11','A12','A13','A14','A15','A16','A17','A18','A19','A20','A21','A22','A23','A24','A25','A26','B1','B2','B3','B4','B5','B6','B7','B8','B9','B10','B11','S1','S2','S3','S4','S5','S6')
+    $expectedIds = @('A1','A2','A3','A4','A5','A6','A7','A8','A9','A10','A11','A12','A13','A14','A15','A16','A17','A18','A19','A20','A21','A22','A23','A24','A25','A26','A27','A28','A29','A30','A31','A32','A33','A34','A35','B1','B2','B3','B4','B5','B6','B7','B8','B9','B10','B11','S1','S2','S3','S4','S5','S6')
     $actualIds = @($script:Checks | ForEach-Object { $_.id })
     if ($actualIds.Count -ne $expectedIds.Count -or @(Compare-Object $expectedIds $actualIds).Count -ne 0) {
         Add-Result 'Z0' 'all-required-checks-ran' $false "expected $($expectedIds.Count) checks; observed $($actualIds.Count)"

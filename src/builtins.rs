@@ -12954,16 +12954,19 @@ fn bi_env(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     }
 
     let key = expect_string("env", &args[0])?;
+    validate_env_name("env", key)?;
     match std::env::var(key) {
         Ok(val) => Ok(gate_env_secret(key, val)),
-        // `env(name, default)` returns `default` when the variable is unset.
-        //
-        // The second argument used to be accepted and discarded, so an unset
-        // variable was always `null` — the same defect shape as `round(x, n)`
-        // ignoring `n`. It matters most in bash compatibility mode, where
-        // `echo $NOPE` must print an empty line as bash does, not the word
-        // "null".
-        Err(_) => Ok(args.get(1).cloned().unwrap_or(Value::Null)),
+        // `env(name, default)` returns `default` only when the variable is
+        // absent, the way bash prints an empty line for `echo $NOPE`.
+        Err(std::env::VarError::NotPresent) => Ok(args.get(1).cloned().unwrap_or(Value::Null)),
+        // A variable that is set to bytes that are not valid Unicode is not an
+        // absent one; answering with the default would report it as unset.
+        Err(std::env::VarError::NotUnicode(_)) => Err(crate::safety::bad_arg(
+            "env",
+            "a variable holding valid Unicode; this String interface cannot represent raw bytes",
+            "a value that is not valid Unicode",
+        )),
     }
 }
 
@@ -12980,6 +12983,53 @@ fn gate_env_secret(key: &str, val: String) -> Value {
     }
 }
 
+/// Refuse an environment variable name the platform call cannot honour.
+///
+/// `std::env::set_var` and `remove_var` panic on an empty name, on a name
+/// containing `=`, and on any NUL. Windows also reserves the leading-`=` drive
+/// pseudo-vars (`=C:`) for the OS itself. Every other name is passed through
+/// unchanged: Win32 and POSIX both accept non-ASCII names, so this refuses only
+/// what the platform cannot take.
+fn validate_env_name(builtin: &str, name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(crate::safety::bad_arg(
+            builtin,
+            "a non-empty variable name",
+            "an empty name",
+        ));
+    }
+    if name.contains('=') {
+        return Err(crate::safety::bad_arg(
+            builtin,
+            "a variable name without '='",
+            "a name containing '='",
+        ));
+    }
+    if name.contains('\0') {
+        return Err(crate::safety::bad_arg(
+            builtin,
+            "a variable name without NUL",
+            "a name containing NUL",
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse an environment variable value the platform call cannot honour.
+///
+/// The refused value is never rendered into the error: a value can be a
+/// credential, so the diagnostic names the kind of failure instead.
+fn validate_env_value(builtin: &str, value: &str) -> Result<()> {
+    if value.contains('\0') {
+        return Err(crate::safety::bad_arg(
+            builtin,
+            "a value without NUL",
+            "String containing NUL",
+        ));
+    }
+    Ok(())
+}
+
 /// set_env(key, value) - Set environment variable
 /// Args:
 ///   - key: String - Environment variable name
@@ -12989,14 +13039,18 @@ fn gate_env_secret(key: &str, val: String) -> Value {
 /// Example:
 ///   set_env("MY_VAR", "value")
 fn bi_set_env(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
-    if args.len() < 2 {
-        return Err(crate::safety::arg_err(
-            "set_env requires key and value arguments",
+    if args.len() != 2 {
+        return Err(crate::safety::bad_arg(
+            "set_env",
+            "exactly two arguments: key, value",
+            &format!("{}", args.len()),
         ));
     }
 
     let key = expect_string("set_env", &args[0])?;
     let value = expect_string("set_env", &args[1])?;
+    validate_env_name("set_env", key)?;
+    validate_env_value("set_env", value)?;
 
     std::env::set_var(key, value);
     Ok(Value::Null)
@@ -38278,10 +38332,17 @@ fn bi_env_var(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         .and_then(|v| v.as_str().ok())
         .map(|s| s.to_string())
         .ok_or_else(|| crate::safety::arg_err("variable name required"))?;
-    // Unset was "", where env() and sys.env() answer null.
+    validate_env_name("env_var", &name)?;
+    // An absent variable answers null, as env() and sys.env() do.
     Ok(match std::env::var(&name) {
         Ok(v) => gate_env_secret(&name, v),
-        Err(_) => Value::Null,
+        Err(std::env::VarError::NotPresent) => Value::Null,
+        // A set variable whose bytes are not valid Unicode is not an absent one.
+        Err(std::env::VarError::NotUnicode(_)) => return Err(crate::safety::bad_arg(
+            "env_var",
+            "a variable holding valid Unicode; this String interface cannot represent raw bytes",
+            "a value that is not valid Unicode",
+        )),
     })
 }
 
@@ -38296,12 +38357,18 @@ fn bi_env_vars(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
 }
 
 fn bi_env_set(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
-    if args.len() < 2 {
-        return Err(crate::safety::arg_err("name and value required"));
+    if args.len() != 2 {
+        return Err(crate::safety::bad_arg(
+            "env_set",
+            "exactly two arguments: name, value",
+            &format!("{}", args.len()),
+        ));
     }
-    let name = args[0].as_str().unwrap_or("").to_string();
-    let value = args[1].as_str().unwrap_or("").to_string();
-    std::env::set_var(&name, &value);
+    let name = expect_string("env_set", &args[0])?;
+    let value = expect_string("env_set", &args[1])?;
+    validate_env_name("env_set", name)?;
+    validate_env_value("env_set", value)?;
+    std::env::set_var(name, value);
     Ok(Value::Bool(true))
 }
 
@@ -38311,6 +38378,7 @@ fn bi_env_unset(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         .and_then(|v| v.as_str().ok())
         .map(|s| s.to_string())
         .ok_or_else(|| crate::safety::arg_err("variable name required"))?;
+    validate_env_name("env_unset", &name)?;
     std::env::remove_var(&name);
     Ok(Value::Bool(true))
 }
@@ -39755,82 +39823,197 @@ fn bi_platform_compatible(args: Vec<Value>, _input: Option<Value>) -> Result<Val
     Ok(Value::Bool(os_match && arch_match && family_match))
 }
 
+/// Read the platform store as a JSON key map, treating a missing file as empty.
+///
+/// Absence is the only failure that means "no entries". Any other I/O failure --
+/// including bytes that are not UTF-8 -- and any document that is not a JSON
+/// object is a coded error, so a store that cannot be read back is never
+/// mistaken for an empty one and written over.
+fn platform_db_read(
+    db_path: &std::path::Path,
+    builtin: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>> {
+    let content = match std::fs::read_to_string(db_path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(serde_json::Map::new());
+        }
+        Err(e) => return Err(crate::safety::fs_error(builtin, db_path, &e)),
+    };
+    platform_db_parse(&content, db_path, builtin)
+}
+
+/// Parse one store document into its key map.
+///
+/// The refusal carries the path and the parser's own diagnostic, never the
+/// document's bytes: a store holds whatever a caller put there, and those
+/// contents are not this error's to publish.
+fn platform_db_parse(
+    content: &str,
+    db_path: &std::path::Path,
+    builtin: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>> {
+    let parsed: serde_json::Value = serde_json::from_str(content).map_err(|e| {
+        platform_db_bad_state(
+            builtin,
+            db_path,
+            &format!("is not valid JSON: {e}"),
+            "invalid JSON",
+        )
+    })?;
+    match parsed {
+        serde_json::Value::Object(map) => Ok(map),
+        other => {
+            let kind = json_kind(&other);
+            Err(platform_db_bad_state(
+                builtin,
+                db_path,
+                &format!("has {kind} at the top level, not an object"),
+                &format!("{kind} at the top level"),
+            ))
+        }
+    }
+}
+
+/// `E_BAD_STATE` for a store that cannot be read back as written.
+///
+/// `safety::bad_state` names a prerequisite call to make first, which is the
+/// wrong repair for a damaged file: the file is there and the next call cannot
+/// fix it. This hint names the repair that exists.
+fn platform_db_bad_state(
+    builtin: &str,
+    db_path: &std::path::Path,
+    detail: &str,
+    got: &str,
+) -> anyhow::Error {
+    anyhow::Error::new(crate::safety::SafetyError {
+        code: crate::safety::ErrorCode::BadState,
+        message: format!(
+            "{builtin}: the platform store {} {detail}",
+            db_path.display()
+        ),
+        builtin: builtin.to_string(),
+        hint: "repair the store from backup; nothing was written".to_string(),
+        approval: None,
+        did_you_mean: Vec::new(),
+        expected: "a JSON object whose keys name stored snapshots".to_string(),
+        got: got.to_string(),
+    })
+}
+
+/// What a JSON value is, named without repeating any of its contents.
+fn json_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
+}
+
+/// The optional store key. Absent selects `default`; any other type is refused.
+///
+/// Every value that was not a string used to select the default silently, so
+/// `platform_db_store(1, snapshot)` wrote the `default` key and reported success.
+fn platform_db_key(args: &[Value], builtin: &str) -> Result<String> {
+    match args.first() {
+        None => Ok("default".to_string()),
+        Some(Value::Str(key)) => Ok(key.clone()),
+        Some(other) => Err(crate::safety::bad_arg(
+            builtin,
+            "a String key, or no key for the default",
+            other.type_name(),
+        )),
+    }
+}
+
+/// Create the platform store. An existing file is validated, never overwritten.
 fn bi_platform_db_init(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     let db_path = platform_db_path();
-    if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| crate::safety::fs_error("platform_db_init", parent, &e))?;
-    }
-    if !db_path.exists() {
-        std::fs::write(&db_path, "{}")
-            .map_err(|e| crate::safety::fs_error("platform_db_init", &db_path, &e))?;
+    // Nothing is created or written before the workspace jail has judged this
+    // path, and the path it resolved is the one acted on.
+    let db_path = std::path::PathBuf::from(guard_local_write(
+        "platform_db_init",
+        &db_path.to_string_lossy(),
+    )?);
+
+    match std::fs::read_to_string(&db_path) {
+        // A store that is already there is read and validated rather than
+        // presumed good and left alone.
+        Ok(content) => {
+            platform_db_parse(&content, &db_path, "platform_db_init")?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = db_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| crate::safety::fs_error("platform_db_init", parent, &e))?;
+            }
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&db_path)
+            {
+                Ok(mut file) => {
+                    use std::io::Write as _;
+                    file.write_all(b"{}")
+                        .map_err(|e| crate::safety::fs_error("platform_db_init", &db_path, &e))?;
+                }
+                // Another writer created the file first: validate theirs rather
+                // than replacing it with an empty one.
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let content = std::fs::read_to_string(&db_path)
+                        .map_err(|e| crate::safety::fs_error("platform_db_init", &db_path, &e))?;
+                    platform_db_parse(&content, &db_path, "platform_db_init")?;
+                }
+                Err(e) => {
+                    return Err(crate::safety::fs_error("platform_db_init", &db_path, &e));
+                }
+            }
+        }
+        Err(e) => return Err(crate::safety::fs_error("platform_db_init", &db_path, &e)),
     }
     Ok(Value::Str(db_path.to_string_lossy().to_string()))
 }
 
 fn bi_platform_db_store(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
-    let key = args
-        .first()
-        .and_then(|v| v.as_str().ok())
-        .unwrap_or("default");
-    let snapshot = match args.get(1) {
-        Some(v) => v.clone(),
-        None => bi_platform_snapshot(vec![], None)?,
-    };
+    let key = platform_db_key(&args, "platform_db_store")?;
 
     let db_path = platform_db_path();
-    bi_platform_db_init(vec![], None)?;
+    // The guard runs before the directory is created or the file is touched, and
+    // the path it resolves is the one written, so containment and the write
+    // cannot disagree about the target.
+    let db_path = std::path::PathBuf::from(guard_local_write(
+        "platform_db_store",
+        &db_path.to_string_lossy(),
+    )?);
 
-    let content = std::fs::read_to_string(&db_path).unwrap_or_else(|_| "{}".to_string());
-    // A corrupt store read as empty and was then written back with only the
-    // new key: every other entry was destroyed.
-    let mut db: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&content)
-        .map_err(|e| {
-            crate::safety::bad_state(
-                "platform_db_store",
-                &format!(
-                    "the platform store {} is not valid JSON: {e}",
-                    db_path.display()
-                ),
-                "repair or delete the file; nothing was written",
-            )
-        })?;
+    // Read back before writing anything. A store that cannot be parsed is
+    // reported, not replaced by a document holding only this key.
+    let mut db = platform_db_read(&db_path, "platform_db_store")?;
 
-    // Convert Value to serde_json::Value
-    let json_val = value_to_json(snapshot.clone());
-    db.insert(key.to_string(), json_val);
+    let snapshot = match args.get(1) {
+        Some(value) => value.clone(),
+        None => bi_platform_snapshot(vec![], None)?,
+    };
+    db.insert(key, value_to_json(snapshot));
 
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| crate::safety::fs_error("platform_db_store", parent, &e))?;
+    }
     std::fs::write(&db_path, serde_json::to_string_pretty(&db)?)
         .map_err(|e| crate::safety::fs_error("platform_db_store", &db_path, &e))?;
     Ok(Value::Bool(true))
 }
 
 fn bi_platform_db_load(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
-    let key = args
-        .first()
-        .and_then(|v| v.as_str().ok())
-        .unwrap_or("default");
+    let key = platform_db_key(&args, "platform_db_load")?;
 
     let db_path = platform_db_path();
-    if !db_path.exists() {
-        return Ok(Value::Null);
-    }
-
-    let content = std::fs::read_to_string(&db_path)
-        .map_err(|e| crate::safety::fs_error("platform_db_load", &db_path, &e))?;
-    // A corrupt store read as empty, so every key answered null.
-    let db: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_str(&content).map_err(|e| {
-            crate::safety::bad_state(
-                "platform_db_load",
-                &format!(
-                    "the platform store {} is not valid JSON: {e}",
-                    db_path.display()
-                ),
-                "repair or delete the file; platform_db_store recreates it",
-            )
-        })?;
-    match db.get(key) {
+    let db = platform_db_read(&db_path, "platform_db_load")?;
+    match db.get(&key) {
         Some(val) => Ok(json_to_value(val.clone())),
         None => Ok(Value::Null),
     }
@@ -39838,46 +40021,49 @@ fn bi_platform_db_load(args: Vec<Value>, _input: Option<Value>) -> Result<Value>
 
 fn bi_platform_db_list(_args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     let db_path = platform_db_path();
-    if !db_path.exists() {
-        return Ok(Value::Array(vec![]));
-    }
-
-    let content = std::fs::read_to_string(&db_path)
-        .map_err(|e| crate::safety::fs_error("platform_db_list", &db_path, &e))?;
-    let db: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_str(&content).unwrap_or_default();
+    let db = platform_db_read(&db_path, "platform_db_list")?;
 
     let keys: Vec<Value> = db.keys().map(|k| Value::Str(k.clone())).collect();
     Ok(Value::Array(keys))
 }
 
 fn bi_platform_db_delete(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
-    let key = args.first().and_then(|v| v.as_str().ok()).unwrap_or("");
+    let key = match args.first() {
+        Some(Value::Str(key)) => key.clone(),
+        other => {
+            return Err(crate::safety::bad_arg(
+                "platform_db_delete",
+                "a String key",
+                other.map(|v| v.type_name()).unwrap_or("nothing"),
+            ))
+        }
+    };
 
+    // The delete is gated on the store it would rewrite, not on the key: the key
+    // is data, and what the call removes is the file's current contents.
+    let db_path = crate::safety::resolve_path_str(&platform_db_path().to_string_lossy());
     crate::safety::guard(crate::safety::GuardCtx {
         builtin: "platform_db_delete",
         effect: crate::safety::Effect::Destructive,
         what: "db_delete",
-        targets: vec![key.to_string()],
-        blast_radius: serde_json::json!({ "key": key }),
+        targets: vec![db_path.clone()],
+        blast_radius: serde_json::json!({ "key": &key, "path": &db_path }),
         reversible: false,
-        fs_paths: false,
+        fs_paths: true,
     })?;
 
-    let db_path = platform_db_path();
-    if !db_path.exists() {
+    let db_path = std::path::PathBuf::from(db_path);
+    let mut db = platform_db_read(&db_path, "platform_db_delete")?;
+
+    if db.remove(&key).is_none() {
+        // The key was not there, so the file is left exactly as it was: a delete
+        // that removed nothing does not rewrite the store.
         return Ok(Value::Bool(false));
     }
-
-    let content = std::fs::read_to_string(&db_path)
+    std::fs::write(&db_path, serde_json::to_string_pretty(&db)?)
         .map_err(|e| crate::safety::fs_error("platform_db_delete", &db_path, &e))?;
-    let mut db: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_str(&content).unwrap_or_default();
 
-    let existed = db.remove(key).is_some();
-    std::fs::write(&db_path, serde_json::to_string_pretty(&db)?)?;
-
-    Ok(Value::Bool(existed))
+    Ok(Value::Bool(true))
 }
 
 fn bi_platform_db_compare(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
@@ -39915,14 +40101,23 @@ fn bi_platform_db_export(args: Vec<Value>, _input: Option<Value>) -> Result<Valu
 }
 
 fn bi_platform_db_import(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
-    let source = args.first().and_then(|v| v.as_str().ok()).unwrap_or("");
+    let source = match args.first() {
+        Some(Value::Str(source)) => source.clone(),
+        other => {
+            return Err(crate::safety::bad_arg(
+                "platform_db_import",
+                "a JSON object, or the path of a file containing one",
+                other.map(|v| v.type_name()).unwrap_or("nothing"),
+            ))
+        }
+    };
 
     // Check if it's a file path or JSON string
-    let content = if std::path::Path::new(source).exists() {
-        std::fs::read_to_string(source)
+    let content = if std::path::Path::new(&source).exists() {
+        std::fs::read_to_string(&source)
             .map_err(|e| crate::safety::fs_error("platform_db_import", &source, &e))?
     } else {
-        source.to_string()
+        source
     };
 
     // Validate JSON
@@ -39934,20 +40129,38 @@ fn bi_platform_db_import(args: Vec<Value>, _input: Option<Value>) -> Result<Valu
                 &e.to_string(),
             )
         })?;
+    // The parser keeps an integer lexeme beyond `i64` as an `f64`, which rounds
+    // it before the merge; the text is valid JSON by now, so the literal is
+    // refused here instead.
+    crate::json_numbers::validate_integer_literals(&content).map_err(|literal| {
+        crate::safety::bad_arg(
+            "platform_db_import",
+            "JSON integer literals within i64 range; encode larger exact values as JSON strings",
+            &format!("out-of-range integer {literal}"),
+        )
+    })?;
 
     let db_path = platform_db_path();
-    bi_platform_db_init(vec![], None)?;
+    // The guard runs before the directory is created or the file is touched, and
+    // the path it resolves is the one written.
+    let db_path = std::path::PathBuf::from(guard_local_write(
+        "platform_db_import",
+        &db_path.to_string_lossy(),
+    )?);
 
-    // Merge with existing
-    let existing = std::fs::read_to_string(&db_path).unwrap_or_else(|_| "{}".to_string());
-    let mut db: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_str(&existing).unwrap_or_default();
+    // Merge with the existing store, read back and validated first.
+    let mut db = platform_db_read(&db_path, "platform_db_import")?;
 
     for (k, v) in imported {
         db.insert(k, v);
     }
 
-    std::fs::write(&db_path, serde_json::to_string_pretty(&db)?)?;
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| crate::safety::fs_error("platform_db_import", parent, &e))?;
+    }
+    std::fs::write(&db_path, serde_json::to_string_pretty(&db)?)
+        .map_err(|e| crate::safety::fs_error("platform_db_import", &db_path, &e))?;
     Ok(Value::Int(db.len() as i64))
 }
 
@@ -43529,7 +43742,19 @@ pub fn bi_rm(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             ))
         }
     };
-    let force = matches!(args.get(1), Some(Value::Bool(true)));
+    let force = match args.get(1) {
+        None => false,
+        Some(Value::Bool(force)) => *force,
+        // A wrong-typed flag is a caller error, decided before the guard and
+        // before any filesystem call.
+        Some(other) => {
+            return Err(crate::safety::bad_arg(
+                "rm",
+                "force: Bool",
+                other.type_name(),
+            ))
+        }
+    };
     // Jailed: relative paths are workspace-relative; resolve before the jail check
     // so the guard validates the path that is actually deleted.
     let path = crate::safety::resolve_path_str(&path);
@@ -43545,8 +43770,13 @@ pub fn bi_rm(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     crate::tx::snapshot(&path); // record pre-delete state if a transaction is active
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(Value::Str(format!("removed: {}", path))),
-        Err(e) if force => Ok(Value::Str(format!("rm (forced): {}", e))),
-        Err(e) => Err(anyhow!("rm: {}: {}", path, e)),
+        // A target that is already gone is the one condition `force` covers.
+        Err(e) if force && e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(Value::Str(format!("rm (forced): {}", e)))
+        }
+        // Every other failure -- a wrong-typed target such as a directory, a
+        // permission refusal, a busy file -- is a failure of the call.
+        Err(e) => Err(crate::safety::fs_error("rm", &path, &e)),
     }
 }
 
@@ -43556,7 +43786,17 @@ pub fn bi_rmdir(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         Some(Value::Str(s)) => s.clone(),
         _ => return Err(crate::safety::arg_err("rmdir: expected path string")),
     };
-    let recursive = matches!(args.get(1), Some(Value::Bool(true)));
+    let recursive = match args.get(1) {
+        None => false,
+        Some(Value::Bool(recursive)) => *recursive,
+        Some(other) => {
+            return Err(crate::safety::bad_arg(
+                "rmdir",
+                "recursive: Bool",
+                other.type_name(),
+            ))
+        }
+    };
     // Jailed: relative paths are workspace-relative (resolve before the jail check).
     let path = crate::safety::resolve_path_str(&path);
     crate::safety::guard(crate::safety::GuardCtx {
@@ -43570,9 +43810,9 @@ pub fn bi_rmdir(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     })?;
     crate::tx::snapshot(&path); // back up the directory tree if a transaction is active
     if recursive {
-        std::fs::remove_dir_all(&path).map_err(|e| anyhow!("rmdir -r: {}: {}", path, e))?;
+        std::fs::remove_dir_all(&path).map_err(|e| crate::safety::fs_error("rmdir", &path, &e))?;
     } else {
-        std::fs::remove_dir(&path).map_err(|e| anyhow!("rmdir: {}: {}", path, e))?;
+        std::fs::remove_dir(&path).map_err(|e| crate::safety::fs_error("rmdir", &path, &e))?;
     }
     Ok(Value::Str(format!("removed directory: {}", path)))
 }

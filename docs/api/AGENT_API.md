@@ -17,9 +17,9 @@ Authorization: Bearer <token>
 Start the server one of three ways:
 
 ```sh
-aethershell agent-api serve                    # generates a token, prints it at startup
-AETHER_API_TOKEN=<token> aethershell agent-api serve
-aethershell agent-api serve --token <token>    # visible in the process list; prefer the env var
+ae agent serve                    # generates a token, prints it at startup
+AETHER_API_TOKEN=<token> ae agent serve
+ae agent serve --token <token>    # visible in the process list; prefer the env var
 ```
 
 There is deliberately no way to run with authentication disabled.
@@ -44,7 +44,7 @@ Request/response routes are cancelled with **408 Request Timeout** after
 `--request-timeout` seconds (default `300`):
 
 ```sh
-aethershell agent-api serve --request-timeout 60
+ae agent serve --request-timeout 60
 ```
 
 `0` disables the deadline. Prefer raising it: without one, a single
@@ -80,6 +80,8 @@ All endpoints return `AgentResponse`:
 
 - **200 OK** — `success: true`
 - **400 Bad Request** — `success: false` with `error` field
+
+The convenience `/api/v1/eval` and `/api/v1/stream/eval` routes require a JSON object containing a String `code`. Missing, null or wrong-typed code is HTTP 400 with `E_BAD_ARG`, not a successful empty program. An explicitly supplied empty or whitespace String remains a valid program. `/api/v1/pipeline` and `/api/v1/stream/pipeline` require an Array `steps`; malformed descriptors retain their validation reason instead of becoming an empty pipeline. An omitted input and `"input": null` remain distinct. Invalid bodies are rejected before evaluation or SSE stream creation. Unknown object fields remain tolerated for compatibility. Axum still owns rejection of syntactically invalid JSON; these body-validation rules concern valid JSON with invalid required fields.
 
 ---
 

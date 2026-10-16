@@ -359,14 +359,22 @@ fn lex(src: &str) -> Result<Vec<Spanned>, ParseError> {
         }
     }
 
-    // Helper: read number (optionally with a leading '-' already consumed)
+    // Helper: read number (optionally with a leading '-' already consumed).
+    //
+    // An SI form that does not fit `i64` is refused as one lexeme — digits and
+    // suffix together — instead of being left to the parser as an unscaled
+    // integer with a stray identifier after it.
     fn read_number(
         chars: &[char],
         pos: &mut usize,
         line: &mut usize,
         col: &mut usize,
         mut acc: String,
-    ) -> (Tok, String) {
+    ) -> Result<(Tok, String), ParseError> {
+        // The literal's first character: the caller already consumed the sign,
+        // and every number character advances one column.
+        let open_line = *line;
+        let open_col = *col - acc.chars().count();
         // digits before decimal
         while let Some(ch) = peek(chars, *pos) {
             if ch.is_ascii_digit() {
@@ -390,7 +398,7 @@ fn lex(src: &str) -> Result<Vec<Spanned>, ParseError> {
                         break;
                     }
                 }
-                return (Tok::Float, acc);
+                return Ok((Tok::Float, acc));
             }
         }
         // SI suffix on integer literals: 1k / 1M / 1G → scaled Int, in the lexer
@@ -410,14 +418,24 @@ fn lex(src: &str) -> Result<Vec<Spanned>, ParseError> {
                     None => true,
                 };
                 if after_ok {
-                    if let Ok(n) = acc.parse::<i64>() {
-                        advance(chars, pos, line, col); // consume the suffix
-                        return (Tok::Int, n.saturating_mul(m).to_string());
-                    }
+                    let scaled = acc
+                        .parse::<i64>()
+                        .ok()
+                        .and_then(|n| n.checked_mul(m))
+                        .ok_or_else(|| {
+                            ParseError::with_hint(
+                                format!(
+                                    "integer literal `{acc}{suffix}` at line {open_line}, column {open_col} does not fit the signed 64-bit Int range"
+                                ),
+                                "keep the magnitude as a String, or use a value the suffix scales within i64",
+                            )
+                        })?;
+                    advance(chars, pos, line, col); // consume the suffix
+                    return Ok((Tok::Int, scaled.to_string()));
                 }
             }
         }
-        (Tok::Int, acc)
+        Ok((Tok::Int, acc))
     }
 
     while let Some(c) = peek(&chars, pos) {
@@ -633,18 +651,27 @@ fn lex(src: &str) -> Result<Vec<Spanned>, ParseError> {
             }
             '-' => {
                 advance(&chars, &mut pos, &mut line, &mut col);
-                // negative number if followed by digit
-                if let Some(d) = peek(&chars, pos) {
-                    if d.is_ascii_digit() {
-                        let (kind, text) =
-                            read_number(&chars, &mut pos, &mut line, &mut col, "-".to_string());
-                        out.push(Spanned {
-                            kind,
-                            text,
-                            line: start_line,
-                            col: start_col,
-                        });
-                        continue;
+                // A signed literal only where no expression can end: `5-3` is
+                // subtraction, while `-5`, `f(-1)` and `[1, -2]` are literals.
+                let signed = out.last().map_or(true, |t| !can_end_expr(t.kind));
+                if signed {
+                    if let Some(d) = peek(&chars, pos) {
+                        if d.is_ascii_digit() {
+                            let (kind, text) = read_number(
+                                &chars,
+                                &mut pos,
+                                &mut line,
+                                &mut col,
+                                "-".to_string(),
+                            )?;
+                            out.push(Spanned {
+                                kind,
+                                text,
+                                line: start_line,
+                                col: start_col,
+                            });
+                            continue;
+                        }
                     }
                 }
                 out.push(Spanned {
@@ -793,7 +820,7 @@ fn lex(src: &str) -> Result<Vec<Spanned>, ParseError> {
             }
             d if d.is_ascii_digit() => {
                 let (kind, text) =
-                    read_number(&chars, &mut pos, &mut line, &mut col, String::new());
+                    read_number(&chars, &mut pos, &mut line, &mut col, String::new())?;
                 out.push(Spanned {
                     kind,
                     text,
@@ -995,6 +1022,46 @@ fn is_ident_start(c: char) -> bool {
 }
 fn is_ident_part(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// Whether a token can be the last one of an expression.
+///
+/// `-` folds into the literal it signs only where no expression can end, so
+/// this list is what keeps `5-3` subtraction while `-5` and `f(-1)` stay
+/// literals. `else` is absent on purpose: `if` requires `{` after it, so it
+/// never sits directly before a `-`.
+fn can_end_expr(kind: Tok) -> bool {
+    matches!(
+        kind,
+        Tok::Int
+            | Tok::Float
+            | Tok::String
+            | Tok::RawString
+            | Tok::Ident
+            | Tok::True
+            | Tok::False
+            | Tok::Null
+            | Tok::RParen
+            | Tok::RBracket
+            | Tok::RBrace
+    )
+}
+
+/// The exact `i64` a lexed integer token carries, or the parse error naming it.
+///
+/// The lexer can leave digits that do not fit `i64` in an integer token — a
+/// plain literal, or the digits of an SI form whose suffix rule did not apply —
+/// so the conversion is checked here rather than falling back to `0`.
+fn int_literal(tok: &Spanned) -> Result<i64> {
+    tok.text.parse::<i64>().map_err(|_| {
+        anyhow::Error::new(ParseError::with_hint(
+            format!(
+                "integer literal `{}` at line {}, column {} does not fit the signed 64-bit Int range",
+                tok.text, tok.line, tok.col
+            ),
+            "use a Float (write a decimal point, e.g. 0.0) or quote the value as a String",
+        ))
+    })
 }
 
 // ============ Parser ============
@@ -1906,7 +1973,7 @@ impl Parser {
             return Ok(Expr::LitFloat(x));
         }
         if self.match_tok(Tok::Int) {
-            let n: i64 = self.prev().text.parse().unwrap_or(0);
+            let n = int_literal(self.prev())?;
             return Ok(Expr::LitInt(n));
         }
         if self.match_tok(Tok::True) {
@@ -2155,7 +2222,7 @@ impl Parser {
 
         // Literals
         if self.match_tok(Tok::Int) {
-            let n: i64 = self.prev().text.parse().unwrap_or(0);
+            let n = int_literal(self.prev())?;
             return Ok(Pattern::LitInt(n));
         }
         if self.match_tok(Tok::String) || self.match_tok(Tok::RawString) {

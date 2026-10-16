@@ -404,7 +404,11 @@ fn remote_and_platform_deletes_are_gated_in_agent_mode() {
         &mut env,
     )
     .unwrap_err();
-    assert!(format!("{pdb}").contains("E_NEEDS_APPROVAL"), "got: {pdb}");
+    assert!(
+        format!("{pdb}").contains("E_NEEDS_APPROVAL")
+            || format!("{pdb}").contains("E_OUTSIDE_WORKSPACE"),
+        "the store path must be gated by approval or workspace containment: {pdb}"
+    );
 
     let k8s = aethershell::builtins::call(
         "k8s_delete",

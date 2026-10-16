@@ -1210,7 +1210,7 @@ fn get_type_definitions() -> Vec<TypeDefinition> {
     vec![
         TypeDefinition {
             name: "Int".to_string(),
-            description: "64-bit signed integer".to_string(),
+            description: "64-bit signed integer. Out-of-range source literals, including scaled k/K/M/G forms, are parse errors rather than zero or saturated values. Integer arithmetic overflow is an error.".to_string(),
             json_equivalent: "number (integer)".to_string(),
             examples: vec!["42".to_string(), "-17".to_string(), "0".to_string()],
             fields: None,
@@ -4647,29 +4647,125 @@ pub mod server {
         run_blocking(AgentRequest::Call { builtin, args }, eval_deadline()).await
     }
 
-    async fn handle_pipeline(Json(body): Json<JsonValue>) -> impl IntoResponse {
-        let steps: Vec<PipelineStep> = serde_json::from_value(
-            body.get("steps")
-                .cloned()
-                .unwrap_or(JsonValue::Array(vec![])),
+    /// Coded HTTP body refusal without interpreter-dispatch metadata.
+    fn invalid_body_response(action: &str, error: &anyhow::Error) -> AgentResponse {
+        error_response(
+            error.to_string(),
+            json!({ "action": action, "code": "E_BAD_ARG" }),
         )
-        .unwrap_or_default();
-
-        // Read the seed from the raw body rather than through `AgentRequest`, so
-        // a present `"input": null` stays distinguishable from an absent one.
-        let input = body.get("input").cloned();
-
-        run_blocking(AgentRequest::Pipeline { steps, input }, eval_deadline()).await
     }
 
-    async fn handle_eval(Json(body): Json<JsonValue>) -> impl IntoResponse {
-        let code = body
-            .get("code")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+    /// The JSON type name of a value, for a refusal that must name the shape it
+    /// got without echoing the value: a body can carry a program or a secret.
+    fn json_shape(value: &JsonValue) -> &'static str {
+        match value {
+            JsonValue::Null => "null",
+            JsonValue::Bool(_) => "boolean",
+            JsonValue::Number(_) => "number",
+            JsonValue::String(_) => "string",
+            JsonValue::Array(_) => "array",
+            JsonValue::Object(_) => "object",
+        }
+    }
 
-        run_blocking(AgentRequest::Eval { code }, eval_deadline()).await
+    /// The program an `/api/v1/eval` or `/api/v1/stream/eval` body carries.
+    ///
+    /// The body must be a JSON object whose `code` is a string. Every other
+    /// shape is refused here, before anything is evaluated, so a caller that
+    /// got the request wrong is told so instead of being handed a successful
+    /// run of the empty program. An explicitly empty or whitespace-only string
+    /// is still a program — it parses to no statements and answers null — and
+    /// the string itself is never rewritten. Fields the request does not name
+    /// are left alone, so a newer client may send them.
+    fn decode_eval_body(body: &JsonValue) -> Result<String, AgentResponse> {
+        let fields = body.as_object().ok_or_else(|| {
+            invalid_body_response(
+                "eval",
+                &crate::safety::bad_arg("eval", "a JSON object body", json_shape(body)),
+            )
+        })?;
+        match fields.get("code") {
+            Some(JsonValue::String(code)) => Ok(code.clone()),
+            Some(other) => Err(invalid_body_response(
+                "eval",
+                &crate::safety::bad_arg("eval", "`code` as a string", json_shape(other)),
+            )),
+            None => Err(invalid_body_response(
+                "eval",
+                &crate::safety::bad_arg("eval", "a `code` field", "no code field"),
+            )),
+        }
+    }
+
+    /// The steps and seed an `/api/v1/pipeline` or `/api/v1/stream/pipeline`
+    /// body carries.
+    ///
+    /// `steps` must be present and an array, and every descriptor in it must
+    /// convert; one that does not is refused with the conversion's own reason,
+    /// never read as an empty pipeline. An empty array is a well-formed
+    /// description and is refused later by `execute_pipeline`, which owns that
+    /// rule for every caller — for the stream routes, `handle_stream_pipeline`
+    /// preflights it so the refusal is not delivered inside a 200 SSE stream.
+    ///
+    /// The seed is cloned from the raw body, so a present `"input": null` stays
+    /// distinguishable from an absent one. Fields the request does not name are
+    /// left alone, so a newer client may send them.
+    fn decode_pipeline_body(
+        body: &JsonValue,
+    ) -> Result<(Vec<PipelineStep>, Option<JsonValue>), AgentResponse> {
+        let fields = body.as_object().ok_or_else(|| {
+            invalid_body_response(
+                "pipeline",
+                &crate::safety::bad_arg("pipeline", "a JSON object body", json_shape(body)),
+            )
+        })?;
+        let steps = match fields.get("steps") {
+            Some(JsonValue::Array(steps)) => steps.clone(),
+            Some(other) => {
+                return Err(invalid_body_response(
+                    "pipeline",
+                    &crate::safety::bad_arg("pipeline", "`steps` as an array", json_shape(other)),
+                ))
+            }
+            None => {
+                return Err(invalid_body_response(
+                    "pipeline",
+                    &crate::safety::bad_arg("pipeline", "a `steps` field", "no steps field"),
+                ))
+            }
+        };
+        let steps =
+            serde_json::from_value::<Vec<PipelineStep>>(JsonValue::Array(steps)).map_err(|e| {
+                invalid_body_response(
+                    "pipeline",
+                    &crate::safety::bad_arg(
+                        "pipeline",
+                        "every step to be a step descriptor",
+                        &e.to_string(),
+                    ),
+                )
+            })?;
+        Ok((steps, fields.get("input").cloned()))
+    }
+
+    async fn handle_pipeline(Json(body): Json<JsonValue>) -> Response {
+        match decode_pipeline_body(&body) {
+            Ok((steps, input)) => {
+                run_blocking(AgentRequest::Pipeline { steps, input }, eval_deadline())
+                    .await
+                    .into_response()
+            }
+            Err(refusal) => (StatusCode::BAD_REQUEST, Json(refusal)).into_response(),
+        }
+    }
+
+    async fn handle_eval(Json(body): Json<JsonValue>) -> Response {
+        match decode_eval_body(&body) {
+            Ok(code) => run_blocking(AgentRequest::Eval { code }, eval_deadline())
+                .await
+                .into_response(),
+            Err(refusal) => (StatusCode::BAD_REQUEST, Json(refusal)).into_response(),
+        }
     }
 
     // ========================================================================
@@ -4723,15 +4819,27 @@ pub mod server {
     }
 
     /// Stream pipeline execution with progress updates
-    async fn handle_stream_pipeline(Json(body): Json<JsonValue>) -> impl IntoResponse {
-        let steps: Vec<PipelineStep> = serde_json::from_value(
-            body.get("steps")
-                .cloned()
-                .unwrap_or(JsonValue::Array(vec![])),
-        )
-        .unwrap_or_default();
+    async fn handle_stream_pipeline(Json(body): Json<JsonValue>) -> Response {
+        let (steps, input) = match decode_pipeline_body(&body) {
+            Ok(decoded) => decoded,
+            Err(refusal) => return (StatusCode::BAD_REQUEST, Json(refusal)).into_response(),
+        };
 
-        let input = body.get("input").cloned();
+        // An empty pipeline is refused before the stream opens. SSE starts with
+        // 200, so a refusal pushed inside the generator would be delivered as a
+        // successful response carrying an error event — a completion the
+        // transport never reported as a failure.
+        if steps.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(invalid_body_response(
+                    "pipeline",
+                    &crate::safety::bad_arg("pipeline", "at least one step", "no steps"),
+                )),
+            )
+                .into_response();
+        }
+
         let total_steps = steps.len();
 
         create_sse_response(async move {
@@ -4739,11 +4847,6 @@ pub mod server {
                 "Starting pipeline with {} steps",
                 total_steps
             ))];
-
-            if steps.is_empty() {
-                events.push(StreamEvent::error("Pipeline must have at least one step"));
-                return events;
-            }
 
             // Process pipeline using existing infrastructure
             let request = AgentRequest::Pipeline {
@@ -4783,15 +4886,15 @@ pub mod server {
 
             events
         })
+        .into_response()
     }
 
     /// Stream code evaluation
-    async fn handle_stream_eval(Json(body): Json<JsonValue>) -> impl IntoResponse {
-        let code = body
-            .get("code")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+    async fn handle_stream_eval(Json(body): Json<JsonValue>) -> Response {
+        let code = match decode_eval_body(&body) {
+            Ok(code) => code,
+            Err(refusal) => return (StatusCode::BAD_REQUEST, Json(refusal)).into_response(),
+        };
 
         create_sse_response(async move {
             let mut events = vec![StreamEvent::start("Evaluating code...")];
@@ -4819,6 +4922,7 @@ pub mod server {
             }
             events
         })
+        .into_response()
     }
 
     /// Helper to create SSE response from events
@@ -5662,6 +5766,329 @@ pub mod server {
                 })
                 .collect(),
             None => vec![],
+        }
+    }
+
+    // ========================================================================
+    // Convenience request-body validation
+    // ========================================================================
+
+    #[cfg(test)]
+    mod request_body_tests {
+        use super::*;
+        use axum::body::to_bytes;
+
+        /// Read a response to completion and parse its JSON body.
+        async fn reply(response: Response) -> (StatusCode, JsonValue) {
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .expect("the response body is readable");
+            let body = serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+                panic!(
+                    "the response body is not JSON ({e}): {}",
+                    String::from_utf8_lossy(&bytes)
+                )
+            });
+            (status, body)
+        }
+
+        fn content_type(response: &Response) -> String {
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_string()
+        }
+
+        /// The stable code inside the structured failure an envelope carries.
+        fn error_code(body: &JsonValue) -> String {
+            let text = body["error"]
+                .as_str()
+                .unwrap_or_else(|| panic!("no error text: {body}"));
+            let parsed: JsonValue = serde_json::from_str(text)
+                .unwrap_or_else(|_| panic!("not the structured failure form: {text}"));
+            parsed["error"]["code"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        }
+
+        /// One body refusal: 400, `E_BAD_ARG`, the action named, the coded error
+        /// text, no result, and neither `structured_data` nor
+        /// `token_accounting`.
+        ///
+        /// The two absences are the proof the refusal came from body validation
+        /// rather than from `run_blocking`: `process_request` attaches
+        /// accounting to every response it produces, and a typed exchange
+        /// marks itself, so neither can belong to a request that never entered
+        /// the interpreter.
+        fn assert_refused(status: StatusCode, body: &JsonValue, action: &str, label: &str) {
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{label}: {body}");
+            assert_eq!(body["success"], json!(false), "{label}: {body}");
+            assert_eq!(body["metadata"]["action"], json!(action), "{label}: {body}");
+            assert_eq!(
+                body["metadata"]["code"],
+                json!("E_BAD_ARG"),
+                "{label}: {body}"
+            );
+            assert!(
+                body.get("result").is_none(),
+                "{label}: a refusal carried a result: {body}"
+            );
+            assert!(
+                body["metadata"].get("structured_data").is_none(),
+                "{label}: a body refusal claimed the typed transport: {body}"
+            );
+            assert!(
+                body["metadata"].get("token_accounting").is_none(),
+                "{label}: the body reached the interpreter: {body}"
+            );
+            assert_eq!(error_code(body), "E_BAD_ARG", "{label}: {body}");
+        }
+
+        // ── eval ────────────────────────────────────────────────────────
+
+        #[tokio::test]
+        async fn a_valid_eval_body_is_the_program_it_carries() {
+            let (status, body) = reply(
+                handle_eval(Json(json!({
+                    "code": "1 + 2",
+                    "future_option": { "mode": "strict" }
+                })))
+                .await
+                .into_response(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["success"], json!(true), "{body}");
+            assert_eq!(body["result"], json!(3), "{body}");
+            // The program is reported exactly as sent, never normalized.
+            assert_eq!(body["metadata"]["code_executed"], json!("1 + 2"), "{body}");
+            assert!(body["metadata"]["token_accounting"].is_object(), "{body}");
+        }
+
+        #[tokio::test]
+        async fn an_explicitly_empty_program_is_still_a_program() {
+            for code in ["", "   \n\t "] {
+                let (status, body) = reply(
+                    handle_eval(Json(json!({ "code": code })))
+                        .await
+                        .into_response(),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{code:?}: {body}");
+                assert_eq!(body["success"], json!(true), "{code:?}: {body}");
+                assert_eq!(body["result"], json!(null), "{code:?}: {body}");
+                assert_eq!(
+                    body["metadata"]["code_executed"],
+                    json!(code),
+                    "{code:?}: the program was rewritten"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn a_malformed_eval_body_is_refused_instead_of_running_nothing() {
+            for (label, request) in [
+                ("no code field", json!({})),
+                ("null code", json!({ "code": null })),
+                ("number code", json!({ "code": 42 })),
+                ("boolean code", json!({ "code": true })),
+                ("array code", json!({ "code": ["1 + 1"] })),
+                ("object code", json!({ "code": { "program": "1 + 1" } })),
+                ("array body", json!(["1 + 1"])),
+                ("string body", json!("1 + 1")),
+                ("null body", json!(null)),
+                ("number body", json!(7)),
+            ] {
+                let (status, body) = reply(handle_eval(Json(request)).await.into_response()).await;
+                assert_refused(status, &body, "eval", label);
+            }
+        }
+
+        #[tokio::test]
+        async fn a_malformed_stream_eval_body_is_a_refusal_and_not_a_stream() {
+            for (label, request) in [
+                ("no code field", json!({})),
+                ("null code", json!({ "code": null })),
+                ("array code", json!({ "code": [1] })),
+                ("array body", json!([1])),
+            ] {
+                let response = handle_stream_eval(Json(request)).await.into_response();
+                assert_eq!(content_type(&response), "application/json", "{label}");
+                let (status, body) = reply(response).await;
+                assert_refused(status, &body, "eval", label);
+            }
+        }
+
+        #[tokio::test]
+        async fn a_valid_stream_eval_still_streams_its_completion() {
+            let response = handle_stream_eval(Json(json!({ "code": "1 + 2" })))
+                .await
+                .into_response();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(content_type(&response), "text/event-stream");
+            let bytes = to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .expect("the stream is readable");
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(text.contains("event: complete"), "no completion: {text}");
+            assert!(
+                text.contains(r#""success":true"#),
+                "no successful completion: {text}"
+            );
+            assert!(
+                text.contains(r#""streamed_items":1"#),
+                "the emitted scalar was not counted: {text}"
+            );
+        }
+
+        // ── pipeline ────────────────────────────────────────────────────
+
+        #[tokio::test]
+        async fn a_present_null_seed_reaches_the_step_as_the_null_value() {
+            let (status, body) = reply(
+                handle_pipeline(Json(json!({
+                    "steps": [{ "builtin": "type_of", "future_field": 1 }],
+                    "input": null,
+                    "future_field": true
+                })))
+                .await
+                .into_response(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["result"], json!("Null"), "{body}");
+            assert_eq!(body["result_type"], json!("String"), "{body}");
+        }
+
+        #[tokio::test]
+        async fn an_omitted_seed_is_still_refused_by_the_step_that_needs_one() {
+            let (status, body) = reply(
+                handle_pipeline(Json(json!({ "steps": [{ "builtin": "type_of" }] })))
+                    .await
+                    .into_response(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(body["success"], json!(false), "{body}");
+            assert_eq!(error_code(&body), "E_BAD_ARG", "{body}");
+            // The step ran: this refusal comes from dispatch, so it carries the
+            // typed marker and the accounting a body refusal never has.
+            assert_eq!(
+                body["metadata"]["structured_data"],
+                json!("typed-v1"),
+                "{body}"
+            );
+            assert!(body["metadata"]["token_accounting"].is_object(), "{body}");
+        }
+
+        #[tokio::test]
+        async fn a_malformed_pipeline_body_is_refused_with_its_own_reason() {
+            for (label, request) in [
+                ("no steps field", json!({})),
+                ("null steps", json!({ "steps": null })),
+                ("number steps", json!({ "steps": 3 })),
+                ("string steps", json!({ "steps": "len" })),
+                (
+                    "object steps",
+                    json!({ "steps": { "0": { "builtin": "len" } } }),
+                ),
+                ("array body", json!([{ "builtin": "len" }])),
+                ("null body", json!(null)),
+                ("number step", json!({ "steps": [7] })),
+                ("string step", json!({ "steps": ["len"] })),
+                ("missing builtin", json!({ "steps": [{}] })),
+                ("null builtin", json!({ "steps": [{ "builtin": null }] })),
+                (
+                    "malformed later descriptor",
+                    json!({ "steps": [{ "builtin": "type_of" }, { "builtin": 7 }] }),
+                ),
+            ] {
+                let (status, body) =
+                    reply(handle_pipeline(Json(request)).await.into_response()).await;
+                assert_refused(status, &body, "pipeline", label);
+            }
+        }
+
+        #[tokio::test]
+        async fn a_malformed_descriptor_reports_the_conversion_reason() {
+            let (status, body) = reply(
+                handle_pipeline(Json(json!({ "steps": [{ "builtin": 7 }] })))
+                    .await
+                    .into_response(),
+            )
+            .await;
+            assert_refused(status, &body, "pipeline", "an integer builtin");
+            let text = body["error"].as_str().unwrap_or_default();
+            assert!(
+                text.contains("invalid type: integer `7`"),
+                "the conversion reason is missing: {text}"
+            );
+            assert!(
+                !text.contains("no steps"),
+                "a descriptor that is not one was reported as an empty pipeline: {text}"
+            );
+        }
+
+        #[tokio::test]
+        async fn an_empty_pipeline_is_still_refused_where_it_always_was() {
+            let (status, body) = reply(
+                handle_pipeline(Json(json!({ "steps": [] })))
+                    .await
+                    .into_response(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(body["success"], json!(false), "{body}");
+            assert_eq!(error_code(&body), "E_BAD_ARG", "{body}");
+            assert_eq!(
+                body["metadata"]["structured_data"],
+                json!("typed-v1"),
+                "{body}"
+            );
+        }
+
+        #[tokio::test]
+        async fn an_empty_stream_pipeline_is_refused_before_the_stream_opens() {
+            let response = handle_stream_pipeline(Json(json!({ "steps": [] })))
+                .await
+                .into_response();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(content_type(&response), "application/json");
+            let (status, body) = reply(response).await;
+            assert_refused(status, &body, "pipeline", "an empty steps array");
+            assert!(
+                body["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("at least one step"),
+                "the refusal must name the rule: {body}"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_valid_stream_pipeline_still_progresses_and_completes() {
+            let response = handle_stream_pipeline(Json(json!({
+                "steps": [{ "builtin": "type_of" }],
+                "input": null
+            })))
+            .await
+            .into_response();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(content_type(&response), "text/event-stream");
+            let bytes = to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .expect("the stream is readable");
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(
+                text.contains("event: progress"),
+                "no per-step progress: {text}"
+            );
+            assert!(text.contains("event: complete"), "no completion: {text}");
+            assert!(text.contains(r#""success":true"#), "{text}");
         }
     }
 }

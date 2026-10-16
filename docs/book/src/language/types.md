@@ -26,6 +26,8 @@ let y = 3.14     # Float
 let z = x + y    # Float (auto-promoted)
 ```
 
+Integer literals and integer match patterns must fit signed i64; out-of-range text is `E_PARSE`, not zero. The integer suffixes `k`/`K`, `M` and `G` multiply by 1,000, 1,000,000 and 1,000,000,000 with the same range check; they never saturate. A minus after an expression is subtraction regardless of spacing: `5-3`, `5 -3` and `5 - 3` all produce `2`. For an unambiguous negative function argument, use parentheses, such as `abs(-7)`, rather than bare word-call syntax. Newlines remain whitespace, so use a semicolon where a separate negative expression is intended.
+
 Integer division always produces a Float:
 
 ```ae
