@@ -81,6 +81,8 @@ All endpoints return `AgentResponse`:
 - **200 OK** — `success: true`
 - **400 Bad Request** — `success: false` with `error` field
 
+Failed responses also expose a directly readable object at `metadata.error`. It carries `code`, `message` and available native fields such as `builtin`, `hint`, `expected`, `got` and `did_you_mean`; the old `error` String remains for older clients. `phase`, `side_effects` and pipeline progress state only what the failing entry point knows. Initial parse/preparation failures can report no effects; execution failures report unknown effects because earlier statements or steps may already have run. `safe_to_retry` is false: a legacy `retryable` hint means a corrected call may work, not that replaying the same effect is safe.
+
 The convenience `/api/v1/eval` and `/api/v1/stream/eval` routes require a JSON object containing a String `code`. Missing, null or wrong-typed code is HTTP 400 with `E_BAD_ARG`, not a successful empty program. An explicitly supplied empty or whitespace String remains a valid program. `/api/v1/pipeline` and `/api/v1/stream/pipeline` require an Array `steps`; malformed descriptors retain their validation reason instead of becoming an empty pipeline. An omitted input and `"input": null` remain distinct. Invalid bodies are rejected before evaluation or SSE stream creation. Unknown object fields remain tolerated for compatibility. Axum still owns rejection of syntactically invalid JSON; these body-validation rules concern valid JSON with invalid required fields.
 
 ---

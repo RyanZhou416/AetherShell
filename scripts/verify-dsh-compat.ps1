@@ -248,7 +248,7 @@ try {
         @{ Id = 'A1'; Name = 'filter-map-typed-array'; Code = '[1, 2, 3, 4] | where(fn(x) => x > 2) | map(fn(x) => x * 10)'; Want = '[30,40]' },
         @{ Id = 'A2'; Name = 'sort-ascending'; Code = '[3, 1, 2] | sort'; Want = '[1,2,3]' },
         @{ Id = 'A3'; Name = 'sort-reverse-flag'; Code = '[3, 1, 2] | sort("-r")'; Want = '[3,2,1]' },
-        @{ Id = 'A4'; Name = 'json-null-roundtrip-nested'; Code = 'json_parse(json_stringify({a: None, nested: [None]}))'; Want = '{"a":null,"nested":[null]}' },
+        @{ Id = 'A4'; Name = 'json-null-roundtrip-nested'; Code = 'json_parse(json_stringify({a: null, nested: [null]}))'; Want = '{"a":null,"nested":[null]}' },
         @{ Id = 'A7'; Name = 'raw-path-and-template'; Code = 'r"C:\temp\new ${1+2}"'; Want = '"C:\\temp\\new ${1+2}"' },
         @{ Id = 'A13'; Name = 'integer-extrema-preserve-precision'; Code = 'max([9007199254740993,9007199254740992])'; Want = '9007199254740993' },
         @{ Id = 'A14'; Name = 'structured-group-keys-stay-distinct'; Code = '[{k:[1,2]},{k:[3,4]}] | group_by("k") | len'; Want = '2' },
@@ -313,7 +313,9 @@ try {
         @{Id='A26';Name='materialized-range-has-a-size-budget';Code='range(1000001)';ErrorCode='E_BUDGET_EXCEEDED'},
         @{Id='A30';Name='invalid-environment-name-is-refused';Code='env_set("", "value")';ErrorCode='E_BAD_ARG'},
         @{Id='A31';Name='wrong-typed-removal-flag-is-refused';Code='rm("missing-private-file", "yes")';ErrorCode='E_BAD_ARG'},
-        @{Id='A34';Name='invalid-environment-read-is-not-unset';Code='env("", "fallback")';ErrorCode='E_BAD_ARG'}
+        @{Id='A34';Name='invalid-environment-read-is-not-unset';Code='env("", "fallback")';ErrorCode='E_BAD_ARG'},
+        @{Id='A43';Name='undefined-source-name-is-not-null';Code='missing_fork_probe';ErrorCode='E_UNBOUND_VARIABLE'},
+        @{Id='A44';Name='missing-sort-field-is-not-a-null-key';Code='[{n:1},{}] | sort_by("n")';ErrorCode='E_UNKNOWN_FIELD'}
     )) {
         $run = Invoke-Ae -Arguments @('--deterministic', '-c', $invalidNumber.Code)
         Add-Result $invalidNumber.Id $invalidNumber.Name `
@@ -383,6 +385,15 @@ try {
             "success=$($document.success) exit=$($run.ExitCode) expectedValueMatches=$matches"
     }
 
+    $failureRun = Invoke-Ae -Arguments @('agent', 'execute') -Stdin '{"action":"eval","code":"missing_fork_probe"}'
+    $failureDocument = $null
+    try { $failureDocument = $failureRun.Out | ConvertFrom-Json -ErrorAction Stop } catch { $failureDocument = $null }
+    $errorData = $failureDocument.metadata.error
+    Add-Result 'B12' 'direct-error-data-states-runtime-and-no-safe-replay' `
+        (($failureRun.ExitCode -eq 0) -and ($failureDocument.success -ceq $false) -and
+         ($errorData.code -ceq 'E_UNBOUND_VARIABLE') -and ($errorData.phase -ceq 'evaluation') -and
+         ($errorData.side_effects -ceq 'unknown') -and ($errorData.safe_to_retry -ceq $false)) 'metadata.error is directly readable'
+
     [Console]::Error.WriteLine('')
     [Console]::Error.WriteLine('--- ae agent interactive (one process) ---')
 
@@ -438,7 +449,7 @@ try {
         }
     }
 
-    $expectedIds = @('A1','A2','A3','A4','A5','A6','A7','A8','A9','A10','A11','A12','A13','A14','A15','A16','A17','A18','A19','A20','A21','A22','A23','A24','A25','A26','A27','A28','A29','A30','A31','A32','A33','A34','A35','A36','A37','A38','A39','A40','A41','A42','B1','B2','B3','B4','B5','B6','B7','B8','B9','B10','B11','S1','S2','S3','S4','S5','S6')
+    $expectedIds = @('A1','A2','A3','A4','A5','A6','A7','A8','A9','A10','A11','A12','A13','A14','A15','A16','A17','A18','A19','A20','A21','A22','A23','A24','A25','A26','A27','A28','A29','A30','A31','A32','A33','A34','A35','A36','A37','A38','A39','A40','A41','A42','A43','A44','B1','B2','B3','B4','B5','B6','B7','B8','B9','B10','B11','B12','S1','S2','S3','S4','S5','S6')
     $actualIds = @($script:Checks | ForEach-Object { $_.id })
     if ($actualIds.Count -ne $expectedIds.Count -or @(Compare-Object $expectedIds $actualIds).Count -ne 0) {
         Add-Result 'Z0' 'all-required-checks-ran' $false "expected $($expectedIds.Count) checks; observed $($actualIds.Count)"

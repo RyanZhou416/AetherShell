@@ -206,10 +206,15 @@ fn eval_expr_wasm(expr: &Expr, env: &mut Env) -> Result<Value, String> {
         // source means the same thing on both targets.
         Expr::LitRawStr(s) => Ok(Value::Str(s.clone())),
         Expr::Null => Ok(Value::Null),
+        // The browser evaluator has no `safety` (that module is native-only),
+        // so the code is carried as text in the same `E_*` spelling the native
+        // JSON form uses. A read that resolves to nothing is a failure here
+        // too: the native evaluator answered `null`, which made a typo a
+        // confident wrong answer at exit 0.
         Expr::Ident(name) => env
             .get_var(name)
             .cloned()
-            .ok_or_else(|| format!("undefined variable: {}", name)),
+            .ok_or_else(|| format!("E_UNBOUND_VARIABLE: undefined variable: {}", name)),
         Expr::Array(items) => {
             let mut vals = Vec::with_capacity(items.len());
             for e in items {
@@ -265,16 +270,22 @@ fn eval_expr_wasm(expr: &Expr, env: &mut Env) -> Result<Value, String> {
             args,
             named,
         } => {
+            // Named arguments are implemented nowhere, and this evaluator
+            // evaluated them for an `eval_call_wasm` that ignores them.
+            // Refused before any argument runs, exactly as on the native side.
+            if !named.is_empty() {
+                let names: Vec<&str> = named.iter().map(|(k, _)| k.as_str()).collect();
+                return Err(format!(
+                    "E_BAD_ARG: named arguments are not implemented: {}",
+                    names.join(", ")
+                ));
+            }
             if let Expr::Ident(func_name) = callee.as_ref() {
                 let mut evaled_args = Vec::with_capacity(args.len());
                 for a in args {
                     evaled_args.push(eval_expr_wasm(a, env)?);
                 }
-                let mut evaled_named = Vec::with_capacity(named.len());
-                for (k, v) in named {
-                    evaled_named.push((k.clone(), eval_expr_wasm(v, env)?));
-                }
-                eval_call_wasm(func_name, &evaled_args, &evaled_named, None, env)
+                eval_call_wasm(func_name, &evaled_args, &[], None, env)
             } else {
                 let callee_val = eval_expr_wasm(callee, env)?;
                 if let Value::Lambda(lam) = callee_val {
@@ -364,16 +375,19 @@ fn eval_piped_wasm(expr: &Expr, piped: Value, env: &mut Env) -> Result<Value, St
             args,
             named,
         } => {
+            if !named.is_empty() {
+                let names: Vec<&str> = named.iter().map(|(k, _)| k.as_str()).collect();
+                return Err(format!(
+                    "E_BAD_ARG: named arguments are not implemented: {}",
+                    names.join(", ")
+                ));
+            }
             if let Expr::Ident(func_name) = callee.as_ref() {
                 let mut evaled_args = Vec::with_capacity(args.len());
                 for a in args {
                     evaled_args.push(eval_expr_wasm(a, env)?);
                 }
-                let mut evaled_named = Vec::with_capacity(named.len());
-                for (k, v) in named {
-                    evaled_named.push((k.clone(), eval_expr_wasm(v, env)?));
-                }
-                eval_call_wasm(func_name, &evaled_args, &evaled_named, Some(piped), env)
+                eval_call_wasm(func_name, &evaled_args, &[], Some(piped), env)
             } else {
                 Err("piped expression must be a function call".to_string())
             }
@@ -667,7 +681,14 @@ fn eval_call_wasm(
                 let n = match v {
                     Value::Int(n) => *n as f64,
                     Value::Float(f) => *f,
-                    _ => continue,
+                    // A non-numeric element is refused, not skipped: skipping
+                    // turned `min([1, "x"])` into a confident `1`.
+                    other => {
+                        return Err(format!(
+                            "E_BAD_ARG: min requires a numeric array; got {}",
+                            other.type_name()
+                        ))
+                    }
                 };
                 min_val = Some(min_val.map_or(n, |m| if n < m { n } else { m }));
             }
@@ -682,7 +703,13 @@ fn eval_call_wasm(
                 let n = match v {
                     Value::Int(n) => *n as f64,
                     Value::Float(f) => *f,
-                    _ => continue,
+                    // See `min`: an unusable element must not be dropped.
+                    other => {
+                        return Err(format!(
+                            "E_BAD_ARG: max requires a numeric array; got {}",
+                            other.type_name()
+                        ))
+                    }
                 };
                 max_val = Some(max_val.map_or(n, |m| if n > m { n } else { m }));
             }
@@ -697,9 +724,16 @@ fn eval_call_wasm(
                 match v {
                     Value::Int(n) => total += *n as f64,
                     Value::Float(f) => total += f,
-                    _ => {}
+                    // See `min`: a dropped element silently changed the total.
+                    other => {
+                        return Err(format!(
+                            "E_BAD_ARG: sum requires a numeric array; got {}",
+                            other.type_name()
+                        ))
+                    }
                 }
             }
+            // Empty input stays Float 0, as it was.
             Ok(Value::Float(total))
         }
         // String

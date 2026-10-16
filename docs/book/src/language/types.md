@@ -125,6 +125,12 @@ JSON text parsed by `json_parse`, `from_json` or `open` for JSON/JSONL must have
 
 `group_by` uses the full typed field value for group identity, independently of its display label. Distinct arrays or records, and numeric `1` versus String `"1"`, remain different groups even when their `Name` labels are identical.
 
+## Strict evaluation
+
+An unbound source variable raises `E_UNBOUND_VARIABLE`; it is not an implicit null. A variable explicitly bound to `null` remains valid, and optional/default operations keep their stated behavior. Named arguments are refused when the evaluator does not implement them, before evaluating their argument expressions. These rules apply directly, without a strict-mode switch.
+
+Record-oriented projection, field sorting, grouping, property filtering and numeric measurement refuse a missing requested field or a wrong-typed row rather than inventing empty strings or silently dropping values. Use an explicit optional lookup or transform heterogeneous data deliberately when absence is expected.
+
 ## Truthiness
 
 All values have a boolean interpretation:

@@ -1189,6 +1189,14 @@ pub enum ErrorCode {
     /// A record field (which is how module functions like `file.read` resolve)
     /// does not exist. Like `UnknownBuiltin`, carries `did_you_mean`.
     UnknownField,
+    /// A variable is *read* and no binding provides it.
+    ///
+    /// Distinct from `UnknownBuiltin`, which is the name being *called* that is
+    /// wrong: this is a read. The evaluator answered `null` here, so a typo in
+    /// an expression became a confident wrong answer at exit 0 -- the same
+    /// failure shape the bash `$HOME` expansion had before it was fixed
+    /// (`tests/bash_compat_variables.rs`). An explicit `null` stays a value.
+    UnboundVariable,
     /// An external tool the builtin shells out to is not installed.
     ///
     /// Distinct from every other code here because the fix is neither a
@@ -1274,6 +1282,7 @@ impl ErrorCode {
             ErrorCode::BudgetExceeded => "E_BUDGET_EXCEEDED",
             ErrorCode::UnknownBuiltin => "E_UNKNOWN_BUILTIN",
             ErrorCode::UnknownField => "E_UNKNOWN_FIELD",
+            ErrorCode::UnboundVariable => "E_UNBOUND_VARIABLE",
             ErrorCode::ToolMissing => "E_TOOL_MISSING",
             ErrorCode::NoUi => "E_NO_UI",
             ErrorCode::Unimplemented => "E_UNIMPLEMENTED",
@@ -1296,6 +1305,8 @@ impl ErrorCode {
             ErrorCode::BadArg | ErrorCode::UnknownBuiltin | ErrorCode::UnknownField => true,
             // Retryable by naming something that exists...
             ErrorCode::NotFound => true,
+            // ...this one by naming or declaring the variable the read meant...
+            ErrorCode::UnboundVariable => true,
             // ...and this one by running the prerequisite the hint names, not
             // by changing anything about this call.
             ErrorCode::BadState => true,
@@ -1340,8 +1351,9 @@ impl ErrorCode {
         match self {
             // bash: "command not found". A missing external tool is the same
             // condition one level out, and an agent that knows shell reads 127
-            // without being told.
-            ErrorCode::UnknownBuiltin | ErrorCode::ToolMissing => 127,
+            // without being told. A variable read that resolves to nothing is
+            // the same "name does not resolve" condition, one namespace in.
+            ErrorCode::UnknownBuiltin | ErrorCode::ToolMissing | ErrorCode::UnboundVariable => 127,
             // EX_USAGE — the call was malformed.
             ErrorCode::BadArg | ErrorCode::UnknownField => 64,
             // EX_NOPERM — refused, and retrying unchanged will refuse again.
@@ -1759,6 +1771,27 @@ pub fn unknown_field(field: &str, candidates: Vec<String>) -> anyhow::Error {
         did_you_mean: candidates,
         expected: String::new(),
         got: String::new(),
+    })
+}
+
+/// Build a structured unbound-variable error (`E_UNBOUND_VARIABLE`).
+///
+/// `name` is the identifier as the program wrote it, so the message names the
+/// read that failed rather than the expression around it. The hint carries the
+/// whole repair: declare the name, pass it in, or write `null` when the value
+/// really is meant to be absent -- an explicit `null` is a value, and stays
+/// one.
+pub fn unbound_variable(name: &str) -> anyhow::Error {
+    anyhow::Error::new(SafetyError {
+        code: ErrorCode::UnboundVariable,
+        message: format!("undefined variable: {}", name),
+        builtin: String::new(),
+        hint: "declare or pass the variable; use explicit null for missing optional data"
+            .to_string(),
+        approval: None,
+        did_you_mean: Vec::new(),
+        expected: format!("`{name}` to be bound"),
+        got: "no binding".to_string(),
     })
 }
 

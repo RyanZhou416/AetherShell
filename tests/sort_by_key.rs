@@ -75,15 +75,19 @@ fn the_lambda_form_is_unchanged() {
 }
 
 #[test]
-fn a_missing_field_sorts_rather_than_erroring() {
-    // A field absent from some rows yields Null keys — those group together
-    // instead of failing the whole call, which is what a partial dataset needs.
+fn a_missing_field_is_refused_rather_than_becoming_a_null_key() {
+    // A key every row does not carry cannot order those rows: an implicit Null
+    // key sorts a row against values it never had and returns the array as if
+    // the sort had run. The refusal names the field, and the array is left
+    // untouched for the caller to inspect.
     let ragged = Value::Array(vec![
         rec(&[("name", Value::Str("has".into())), ("size", Value::Int(5))]),
         rec(&[("name", Value::Str("lacks".into()))]),
     ]);
-    let out = call("sort_by", vec![ragged, Value::Str("size".into())]).expect("sort_by");
-    assert_eq!(names(&out).len(), 2, "no row is dropped");
+    let err = call("sort_by", vec![ragged, Value::Str("size".into())])
+        .expect_err("a row without the sort field cannot be ordered by it");
+    assert!(err.contains("E_UNKNOWN_FIELD"), "coded refusal: {err}");
+    assert!(err.contains("size"), "names the field: {err}");
 }
 
 #[test]

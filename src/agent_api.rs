@@ -369,6 +369,7 @@ pub struct ModuleFunctionDef {
 /// Process an agent API request
 pub fn process_request(request: &AgentRequest) -> AgentResponse {
     let mut resp = dispatch_request(request);
+    annotate_error(&mut resp);
     annotate_token_accounting(request, &mut resp);
     resp
 }
@@ -456,16 +457,23 @@ const TYPED_DATA_VERSION: &str = "typed-v1";
 /// every other call uses, so effect policy, signature validation, journaling and
 /// the safety gate all still apply. No source text is built from the request,
 /// which is what makes `${…}`, quotes, newlines and record keys inert.
+///
+/// The two refusals are not the same failure: arguments that cannot be
+/// converted are refused before the builtin runs (`phase: "arguments"`, no
+/// effects), while a failure the builtin itself reports is `phase: "execution"`,
+/// where effects are unknown.
 fn execute_call(builtin: &str, args: &JsonValue) -> AgentResponse {
     let mut env = crate::modules::env_with_modules();
     match call_args(builtin, args) {
         Ok(arg_values) => {
             match crate::builtins::call_with_input(builtin, arg_values, None, &mut env) {
                 Ok(value) => value_response(value, typed_metadata("call", Some(builtin))),
-                Err(e) => typed_failure("call", Some(builtin), &e),
+                Err(e) => {
+                    typed_failure("call", Some(builtin), &e, PHASE_EXECUTION, EFFECTS_UNKNOWN)
+                }
             }
         }
-        Err(e) => typed_failure("call", Some(builtin), &e),
+        Err(e) => typed_failure("call", Some(builtin), &e, PHASE_ARGUMENTS, EFFECTS_NONE),
     }
 }
 
@@ -492,12 +500,20 @@ struct PreparedStep<'a> {
 /// those values, and whether policy allows the call, is decided at dispatch — a
 /// runtime failure leaves the steps before it having run, as any sequence of
 /// calls does.
+///
+/// The failure states which half it came from: a description refused in
+/// preparation claims no effects and `completed_steps: 0`, while a dispatch or
+/// `select` failure names its zero-based `step_index`, counts the builtin
+/// dispatches that finished before it, and claims only `side_effects: "unknown"`
+/// — the failing step is not atomic.
 fn execute_pipeline(steps: &[PipelineStep], input: Option<&JsonValue>) -> AgentResponse {
     if steps.is_empty() {
         return typed_failure(
             "pipeline",
             None,
             &crate::safety::bad_arg("pipeline", "at least one step", "no steps"),
+            PHASE_PREPARATION,
+            EFFECTS_NONE,
         );
     }
 
@@ -507,28 +523,58 @@ fn execute_pipeline(steps: &[PipelineStep], input: Option<&JsonValue>) -> AgentR
     let seed = match input {
         Some(value) => match json_to_value("pipeline", value) {
             Ok(value) => Some(value),
-            Err(e) => return typed_failure("pipeline", None, &e),
+            Err(e) => return typed_failure("pipeline", None, &e, PHASE_PREPARATION, EFFECTS_NONE),
         },
         None => None,
     };
     let mut prepared: Vec<PreparedStep<'_>> = Vec::with_capacity(steps.len());
-    for step in steps {
+    for (index, step) in steps.iter().enumerate() {
         // A predicate *is* the lambda the builtin takes, so `args` is not the
         // call's argument list and is not converted.
         let args = match &step.predicate {
             Some(predicate) => match predicate_lambda(&step.builtin, predicate, &mut env) {
                 Ok(lambda) => vec![lambda],
-                Err(e) => return typed_failure("pipeline", Some(step.builtin.as_str()), &e),
+                Err(e) => {
+                    return typed_step_failure(
+                        "pipeline",
+                        Some(step.builtin.as_str()),
+                        &e,
+                        PHASE_PREPARATION,
+                        EFFECTS_NONE,
+                        index,
+                        0,
+                    )
+                }
             },
             None => match call_args(&step.builtin, &step.args) {
                 Ok(values) => values,
-                Err(e) => return typed_failure("pipeline", Some(step.builtin.as_str()), &e),
+                Err(e) => {
+                    return typed_step_failure(
+                        "pipeline",
+                        Some(step.builtin.as_str()),
+                        &e,
+                        PHASE_PREPARATION,
+                        EFFECTS_NONE,
+                        index,
+                        0,
+                    )
+                }
             },
         };
         let select = match &step.select {
             Some(path) => match select_segments(path) {
                 Ok(segments) => Some(segments),
-                Err(e) => return typed_failure("pipeline", Some(step.builtin.as_str()), &e),
+                Err(e) => {
+                    return typed_step_failure(
+                        "pipeline",
+                        Some(step.builtin.as_str()),
+                        &e,
+                        PHASE_PREPARATION,
+                        EFFECTS_NONE,
+                        index,
+                        0,
+                    )
+                }
             },
             None => None,
         };
@@ -539,17 +585,39 @@ fn execute_pipeline(steps: &[PipelineStep], input: Option<&JsonValue>) -> AgentR
     // and the steps before it have run: a pipeline is a sequence of calls, not
     // a transaction.
     let mut current = seed;
-    for PreparedStep { step, args, select } in prepared {
+    for (index, PreparedStep { step, args, select }) in prepared.into_iter().enumerate() {
         let produced =
             match crate::builtins::call_with_input(&step.builtin, args, current.take(), &mut env) {
                 Ok(value) => value,
-                Err(e) => return typed_failure("pipeline", Some(step.builtin.as_str()), &e),
+                Err(e) => {
+                    return typed_step_failure(
+                        "pipeline",
+                        Some(step.builtin.as_str()),
+                        &e,
+                        PHASE_EXECUTION,
+                        EFFECTS_UNKNOWN,
+                        index,
+                        index,
+                    )
+                }
             };
 
         current = Some(match &select {
             Some(segments) => match select_path(produced, segments) {
                 Ok(value) => value,
-                Err(e) => return typed_failure("pipeline", Some(step.builtin.as_str()), &e),
+                Err(e) => {
+                    // The builtin this step names did complete, so it counts
+                    // among the finished dispatches even though the step failed.
+                    return typed_step_failure(
+                        "pipeline",
+                        Some(step.builtin.as_str()),
+                        &e,
+                        PHASE_EXECUTION,
+                        EFFECTS_UNKNOWN,
+                        index,
+                        index + 1,
+                    );
+                }
             },
             None => produced,
         });
@@ -562,11 +630,20 @@ fn execute_pipeline(steps: &[PipelineStep], input: Option<&JsonValue>) -> AgentR
             "pipeline",
             None,
             &crate::safety::bad_arg("pipeline", "at least one step", "no steps"),
+            PHASE_PREPARATION,
+            EFFECTS_NONE,
         ),
     }
 }
 
 /// Execute raw AetherShell code (the deliberate escape hatch).
+///
+/// The program is parsed before it is run, and the two failures are not the
+/// same: an initial parse failure is `phase: "parse"` with no effects, because
+/// the source never reached the evaluator. A failure from [`eval_program`] is
+/// `phase: "evaluation"` with unknown effects even when it is an `E_PARSE` —
+/// a string literal's interpolation hole is parsed while the literal is
+/// evaluated, so an earlier statement may already have run.
 fn execute_eval(code: &str) -> AgentResponse {
     // Arbitrary source: the module namespaces must be bound, or every
     // `file.read(…)`/`sys.hostname()` in it fails as a field access on Null.
@@ -575,12 +652,17 @@ fn execute_eval(code: &str) -> AgentResponse {
     match parse_program(code) {
         Ok(stmts) => match eval_program(&stmts, &mut env) {
             Ok(value) => value_response(value, json!({ "code_executed": code })),
-            Err(e) => error_response(format!("{}", e), json!({ "code_attempted": code })),
+            Err(e) => {
+                let mut metadata = json!({ "code_attempted": code });
+                error_context(&mut metadata, PHASE_EVALUATION, EFFECTS_UNKNOWN);
+                error_response(format!("{}", e), metadata)
+            }
         },
-        Err(e) => error_response(
-            format!("Parse error: {}", e),
-            json!({ "code_attempted": code }),
-        ),
+        Err(e) => {
+            let mut metadata = json!({ "code_attempted": code });
+            error_context(&mut metadata, PHASE_PARSE, EFFECTS_NONE);
+            error_response(format!("Parse error: {}", e), metadata)
+        }
     }
 }
 
@@ -622,7 +704,13 @@ fn value_response(value: Value, mut metadata: JsonValue) -> AgentResponse {
 }
 
 /// A failure envelope carrying `error` text and transport metadata.
+///
+/// The metadata always gains the directly readable `metadata.error`, so a
+/// refusal built here and never routed through [`process_request`] — an HTTP
+/// body refusal, for one — carries the same failure data as a dispatched one.
 fn error_response(error: String, metadata: JsonValue) -> AgentResponse {
+    let mut metadata = metadata;
+    annotate_error_metadata(&error, &mut metadata);
     AgentResponse {
         success: false,
         result: None,
@@ -650,13 +738,233 @@ fn typed_metadata(action: &str, builtin: Option<&str>) -> JsonValue {
 ///
 /// The `error` string is the structured [`crate::safety::SafetyError`] form, so
 /// a caller reads `code`, `hint` and `did_you_mean` from it; the same code is
-/// repeated in `metadata` for consumers that only keep the envelope's shape.
-fn typed_failure(action: &str, builtin: Option<&str>, error: &anyhow::Error) -> AgentResponse {
+/// repeated in `metadata`, and `metadata.error` states the whole failure as an
+/// object for a caller that reads the envelope instead of re-parsing the text.
+///
+/// `phase` and `side_effects` are the raising site's own facts: an argument
+/// refused before dispatch is `"arguments"` with no effects, while a builtin
+/// that failed after dispatch is `"execution"` with unknown effects.
+fn typed_failure(
+    action: &str,
+    builtin: Option<&str>,
+    error: &anyhow::Error,
+    phase: &str,
+    side_effects: &str,
+) -> AgentResponse {
+    let mut metadata = typed_failure_metadata(action, builtin, error);
+    error_context(&mut metadata, phase, side_effects);
+    error_response(format!("{}", error), metadata)
+}
+
+/// The same, for a failure raised inside a pipeline step.
+///
+/// `step_index` is the zero-based descriptor that failed, and `completed_steps`
+/// counts the builtin dispatches that finished before it — not a claim that the
+/// failing step was atomic, which is why its effects stay unknown.
+fn typed_step_failure(
+    action: &str,
+    builtin: Option<&str>,
+    error: &anyhow::Error,
+    phase: &str,
+    side_effects: &str,
+    step_index: usize,
+    completed_steps: usize,
+) -> AgentResponse {
+    let mut metadata = typed_failure_metadata(action, builtin, error);
+    step_error_context(
+        &mut metadata,
+        phase,
+        side_effects,
+        step_index,
+        completed_steps,
+    );
+    error_response(format!("{}", error), metadata)
+}
+
+/// Transport metadata for a typed failure: the typed exchange's own fields, the
+/// code, and — for a [`crate::safety::SafetyError`] — the failure's own fields,
+/// taken from its structured JSON form rather than re-parsed from its rendering.
+fn typed_failure_metadata(action: &str, builtin: Option<&str>, error: &anyhow::Error) -> JsonValue {
     let mut metadata = typed_metadata(action, builtin);
     if let Some(failure) = error.downcast_ref::<crate::safety::SafetyError>() {
         insert_metadata(&mut metadata, "code", json!(failure.code.as_str()));
+        for (key, value) in structured_error_fields(&failure.to_json()) {
+            error_object(&mut metadata).entry(key).or_insert(value);
+        }
     }
-    error_response(format!("{}", error), metadata)
+    metadata
+}
+
+// ── Directly readable failure data ───────────────────────────────────────
+
+/// The stage a failure arose in. Each name says what had already been decided:
+/// `arguments` and `preparation` are before any dispatch, `parse` is before the
+/// program ran, and `execution`/`evaluation` are at or after one.
+const PHASE_ARGUMENTS: &str = "arguments";
+const PHASE_PREPARATION: &str = "preparation";
+const PHASE_EXECUTION: &str = "execution";
+const PHASE_PARSE: &str = "parse";
+const PHASE_EVALUATION: &str = "evaluation";
+
+/// Whether anything could have been changed before a failure was reported.
+///
+/// `EFFECTS_NONE` is claimed only where the failure precedes every dispatch.
+/// `EFFECTS_UNKNOWN` is the fail-closed claim for anything at or after one: a
+/// call that failed after writing is indistinguishable here from one that
+/// failed before it, so nothing promises the request left the host untouched.
+const EFFECTS_NONE: &str = "none";
+const EFFECTS_UNKNOWN: &str = "unknown";
+
+/// The code for a failure that arrived without one — the taxonomy's own
+/// `E_UNKNOWN`, never a code invented here.
+const UNKNOWN_ERROR_CODE: &str = "E_UNKNOWN";
+
+/// The prefix [`execute_eval`] puts in front of a program's parse failure.
+const PARSE_ERROR_PREFIX: &str = "Parse error: ";
+
+/// The legacy failure fields copied into `metadata.error`, under the names the
+/// structured text already uses.
+const ERROR_FIELDS: [&str; 8] = [
+    "code",
+    "message",
+    "builtin",
+    "hint",
+    "expected",
+    "got",
+    "did_you_mean",
+    "retryable",
+];
+
+/// State every failure's fields directly under `metadata.error`.
+///
+/// A caller reads `code`, `message`, `expected`/`got` and the rest without
+/// re-parsing the `error` string. Facts a producer recorded — `phase`,
+/// `side_effects`, `step_index`, `completed_steps` — are preserved; a failure
+/// no producer stamped keeps the fail-closed defaults.
+///
+/// `retryable` is copied, never recomputed: it still answers whether a
+/// correction to the call can plausibly succeed. `safe_to_retry` is a separate,
+/// narrower claim — that re-issuing this exchange repeats nothing — and no
+/// producer has established it, so it is `false` everywhere: re-running a
+/// request after a failure can repeat an effect the failed call already applied.
+///
+/// A successful response is returned unchanged: a result string that happens to
+/// contain an error document is business data, not a failure.
+fn annotate_error(resp: &mut AgentResponse) {
+    if resp.success {
+        return;
+    }
+    let text = resp.error.clone().unwrap_or_default();
+    let mut metadata = match resp.metadata.take() {
+        Some(JsonValue::Object(fields)) => JsonValue::Object(fields),
+        Some(other) => json!({ "info": other }),
+        None => json!({}),
+    };
+    annotate_error_metadata(&text, &mut metadata);
+    resp.metadata = Some(metadata);
+}
+
+/// Fill `metadata.error` from a failure's text and the fail-closed defaults,
+/// creating the object when absent and never rewriting a field already present.
+///
+/// Both the failure constructors and [`annotate_error`] go through here, so a
+/// response annotated twice is unchanged.
+fn annotate_error_metadata(text: &str, metadata: &mut JsonValue) {
+    for (key, value) in legacy_error_fields(text) {
+        error_object(metadata).entry(key).or_insert(value);
+    }
+    let error = error_object(metadata);
+    error
+        .entry("code".to_string())
+        .or_insert_with(|| JsonValue::String(UNKNOWN_ERROR_CODE.to_string()));
+    error
+        .entry("message".to_string())
+        .or_insert_with(|| JsonValue::String(text.to_string()));
+    error
+        .entry("side_effects".to_string())
+        .or_insert_with(|| JsonValue::String(EFFECTS_UNKNOWN.to_string()));
+    error
+        .entry("safe_to_retry".to_string())
+        .or_insert_with(|| json!(false));
+}
+
+/// Record where a failure arose and what could have run before it.
+///
+/// Only the raising site knows these, so it states them before
+/// [`error_response`] fills the rest; the later annotation never overwrites a
+/// field that is already present.
+fn error_context(metadata: &mut JsonValue, phase: &str, side_effects: &str) {
+    let error = error_object(metadata);
+    error.insert("phase".to_string(), json!(phase));
+    error.insert("side_effects".to_string(), json!(side_effects));
+}
+
+/// The same, for a failure inside a pipeline step: `step_index` is the
+/// zero-based descriptor that failed and `completed_steps` counts the builtin
+/// dispatches that finished before it.
+fn step_error_context(
+    metadata: &mut JsonValue,
+    phase: &str,
+    side_effects: &str,
+    step_index: usize,
+    completed_steps: usize,
+) {
+    error_context(metadata, phase, side_effects);
+    let error = error_object(metadata);
+    error.insert("step_index".to_string(), json!(step_index));
+    error.insert("completed_steps".to_string(), json!(completed_steps));
+}
+
+/// The `metadata.error` object, created as an empty object when absent.
+///
+/// Metadata that is not an object is kept under `info` rather than discarded,
+/// so the failure still carries its annotation.
+fn error_object(metadata: &mut JsonValue) -> &mut serde_json::Map<String, JsonValue> {
+    if !metadata.is_object() {
+        let previous = std::mem::take(metadata);
+        *metadata = json!({ "info": previous });
+    }
+    let fields = metadata
+        .as_object_mut()
+        .expect("just replaced with an object");
+    fields
+        .entry("error".to_string())
+        .or_insert_with(|| json!({}));
+    fields
+        .get_mut("error")
+        .and_then(JsonValue::as_object_mut)
+        .expect("just inserted an object")
+}
+
+/// The fields of a `{"error":{…}}` document, limited to [`ERROR_FIELDS`] so a
+/// document's unrelated keys never become failure fields.
+fn structured_error_fields(document: &JsonValue) -> Vec<(String, JsonValue)> {
+    let Some(error) = document.get("error").and_then(JsonValue::as_object) else {
+        return Vec::new();
+    };
+    ERROR_FIELDS
+        .iter()
+        .filter_map(|key| {
+            error
+                .get(*key)
+                .map(|value| ((*key).to_string(), value.clone()))
+        })
+        .collect()
+}
+
+/// The fields of a failure's own structured text, under their original names.
+///
+/// Exactly two shapes are recognized: the `{"error":{…}}` document a
+/// [`crate::safety::SafetyError`] or [`crate::parser::ParseError`] renders, and
+/// that document behind [`PARSE_ERROR_PREFIX`]. Anything else is an uncoded
+/// failure's prose and yields no fields, so a business string that happens to
+/// contain a JSON document is never re-read as this module's failure shape.
+fn legacy_error_fields(text: &str) -> Vec<(String, JsonValue)> {
+    let candidate = text.strip_prefix(PARSE_ERROR_PREFIX).unwrap_or(text);
+    match serde_json::from_str::<JsonValue>(candidate) {
+        Ok(parsed) => structured_error_fields(&parsed),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Insert one field into an object-valued metadata document.
@@ -4622,16 +4930,15 @@ pub mod server {
                 }
             }
             // The closure panicked. Report it rather than propagating, so one
-            // bad request cannot take down the listener.
+            // bad request cannot take down the listener — and through
+            // `error_response`, so this failure carries `metadata.error` like
+            // every other one.
             Err(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(AgentResponse {
-                    success: false,
-                    result: None,
-                    error: Some(format!("request handler failed: {e}")),
-                    result_type: None,
-                    metadata: None,
-                }),
+                Json(error_response(
+                    format!("request handler failed: {e}"),
+                    json!({}),
+                )),
             ),
         }
     }
@@ -4648,11 +4955,13 @@ pub mod server {
     }
 
     /// Coded HTTP body refusal without interpreter-dispatch metadata.
+    ///
+    /// Nothing ran: the body was refused before it reached the interpreter, so
+    /// the failure states `phase: "arguments"` with no effects.
     fn invalid_body_response(action: &str, error: &anyhow::Error) -> AgentResponse {
-        error_response(
-            error.to_string(),
-            json!({ "action": action, "code": "E_BAD_ARG" }),
-        )
+        let mut metadata = json!({ "action": action, "code": "E_BAD_ARG" });
+        error_context(&mut metadata, PHASE_ARGUMENTS, EFFECTS_NONE);
+        error_response(error.to_string(), metadata)
     }
 
     /// The JSON type name of a value, for a refusal that must name the shape it
@@ -5846,6 +6155,31 @@ pub mod server {
                 "{label}: the body reached the interpreter: {body}"
             );
             assert_eq!(error_code(body), "E_BAD_ARG", "{label}: {body}");
+        }
+
+        /// A body refusal is built by `error_response` and never enters
+        /// `process_request`, so it is the one failure that depends on the
+        /// annotation living in the constructor. It must carry the same
+        /// directly readable object, with no effects claimed.
+        #[test]
+        fn a_body_refusal_carries_the_structured_error_object() {
+            let refusal = invalid_body_response(
+                "eval",
+                &crate::safety::bad_arg("eval", "a JSON object body", "string"),
+            );
+            assert!(!refusal.success);
+            let error = refusal
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("error"))
+                .expect("a body refusal carries metadata.error");
+            assert!(error.is_object(), "not directly readable: {error}");
+            assert_eq!(error["code"], json!("E_BAD_ARG"), "{error}");
+            assert_eq!(error["phase"], json!("arguments"), "{error}");
+            assert_eq!(error["side_effects"], json!("none"), "{error}");
+            assert_eq!(error["safe_to_retry"], json!(false), "{error}");
+            assert!(error["expected"].is_string(), "{error}");
+            assert!(error["got"].is_string(), "{error}");
         }
 
         // ── eval ────────────────────────────────────────────────────────

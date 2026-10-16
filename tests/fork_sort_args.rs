@@ -14,8 +14,8 @@
 //!
 //! What must keep working is covered here too: `sort` with no argument, a
 //! one-parameter key lambda, and a field name with `"desc"`. A field name that a
-//! row does not carry still sorts rather than failing — that behaviour is
-//! asserted by `tests/sort_by_key.rs`.
+//! row does not carry is refused as `E_UNKNOWN_FIELD` rather than sorted under a
+//! `Null` key — that behaviour is asserted by `tests/sort_by_key.rs`.
 
 use aethershell::modules::env_with_modules;
 use aethershell::value::Value;

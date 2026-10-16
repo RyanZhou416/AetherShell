@@ -620,7 +620,16 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
         Expr::Null => Ok(Value::Null),
 
         // ---------- variables ----------
-        Expr::Ident(name) => Ok(env.get_var(name).cloned().unwrap_or(Value::Null)),
+        // A read that resolves to no binding is a coded failure, not `null`.
+        // Answering `null` made a typo a confident wrong answer at exit 0, and
+        // an explicit `null` (or a variable bound to it) is what absence is
+        // spelled with. Calls and pipe stages name their callee separately
+        // (`Expr::Call`/`Expr::Pipe` below), so a bare builtin name is not a
+        // value here and is not invented into one.
+        Expr::Ident(name) => env
+            .get_var(name)
+            .cloned()
+            .ok_or_else(|| crate::safety::unbound_variable(name)),
 
         // ---------- collections ----------
         Expr::Array(items) => {
@@ -743,8 +752,27 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
         Expr::Call {
             callee,
             args,
-            named: _,
+            named,
         } => {
+            // Named arguments reach this `Call` node but no builtin, lambda or
+            // module function implements them: the arm used to bind `named: _`
+            // and evaluate them for no one, so `f(x: 1)` called `f` with no
+            // arguments and said nothing about the drop. Refuse before any
+            // argument or the callee runs -- a refused call must not perform
+            // the effects of the arguments it refused.
+            if !named.is_empty() {
+                let names: Vec<&str> = named.iter().map(|(k, _)| k.as_str()).collect();
+                let target = match &**callee {
+                    Expr::Ident(name) => format!("{name}(...)"),
+                    _ => "this call".to_string(),
+                };
+                return Err(crate::safety::bad_arg(
+                    &target,
+                    "positional arguments only; named arguments are not implemented",
+                    &format!("named argument(s): {}", names.join(", ")),
+                ));
+            }
+
             // Collect evaluated positional args
             let mut vals = Vec::with_capacity(args.len());
             for a in args {
@@ -937,11 +965,16 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
 
 /// Resolve only identifiers and field chains, which cannot mutate the env.
 /// Other expressions keep the normal evaluator path and its evaluation order.
+///
+/// A chain rooted in an unbound name fails as `E_UNBOUND_VARIABLE`, not as a
+/// field access on `null`: `nope.read("x")` is a misspelled name, and the
+/// receiver is what to report.
 fn borrowed_member<'a>(expr: &Expr, env: &'a Env) -> Option<Result<&'a Value>> {
     match expr {
-        Expr::Ident(name) => Some(
-            crate::safety::check_deadline().map(|()| env.get_var(name).unwrap_or(&Value::Null)),
-        ),
+        Expr::Ident(name) => Some(crate::safety::check_deadline().and_then(|()| {
+            env.get_var(name)
+                .ok_or_else(|| crate::safety::unbound_variable(name))
+        })),
         Expr::MemberAccess { object, field } => {
             let value = borrowed_member(object, env)?;
             Some(value.and_then(|value| {

@@ -8704,33 +8704,71 @@ fn bi_select_object(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         return Ok(input);
     }
 
+    // The requested names are checked before a row is read, so an empty subject
+    // cannot turn a malformed request into a successful empty answer.
+    for arg in &args {
+        field_name(arg)?;
+    }
+
     match input {
         Value::Array(arr) => {
-            let mut results = Vec::new();
+            let mut results = Vec::with_capacity(arr.len());
             for item in arr {
                 results.push(select_properties(&item, &args)?);
             }
             Ok(Value::Array(results))
         }
-        _ => Ok(select_properties(&input, &args)?),
+        // A Table is rows of records, and the other projecting builtin (`pick`)
+        // answers an Array for one, so this does too.
+        Value::Table(table) => {
+            let mut results = Vec::with_capacity(table.rows.len());
+            for row in table.rows {
+                results.push(select_properties(&Value::Record(row), &args)?);
+            }
+            Ok(Value::Array(results))
+        }
+        _ => select_properties(&input, &args),
     }
 }
 
-fn select_properties(value: &Value, properties: &[Value]) -> Result<Value> {
-    match value {
-        Value::Record(record) => {
-            let mut selected = BTreeMap::new();
-            for prop in properties {
-                if let Value::Str(prop_name) = prop {
-                    if let Some(val) = record.get(prop_name) {
-                        selected.insert(prop_name.clone(), val.clone());
-                    }
-                }
-            }
-            Ok(Value::Record(selected))
-        }
-        _ => Ok(value.clone()),
+/// One requested field name, refused as `E_BAD_ARG` when it is not a String.
+fn field_name(arg: &Value) -> Result<&str> {
+    match arg {
+        Value::Str(name) => Ok(name.as_str()),
+        other => Err(crate::safety::bad_arg(
+            "Select-Object",
+            "field names: String",
+            other.type_name(),
+        )),
     }
+}
+
+/// Project one record onto the requested fields.
+///
+/// A field the record does not carry is `E_UNKNOWN_FIELD` carrying the nearest
+/// real field names, and a subject that is not a Record is `E_BAD_ARG`: a
+/// projection that cannot be honoured is refused rather than answered with a
+/// narrower record, or with the subject unchanged.
+fn select_properties(value: &Value, properties: &[Value]) -> Result<Value> {
+    let Value::Record(record) = value else {
+        return Err(crate::safety::bad_arg(
+            "Select-Object",
+            "a Record, or an Array of Records",
+            value.type_name(),
+        ));
+    };
+    let mut selected = BTreeMap::new();
+    for prop in properties {
+        let name = field_name(prop)?;
+        let Some(found) = record.get(name) else {
+            return Err(crate::safety::unknown_field(
+                name,
+                nearest_names(name, record.keys().map(|k| k.as_str())),
+            ));
+        };
+        selected.insert(name.to_string(), found.clone());
+    }
+    Ok(Value::Record(selected))
 }
 
 /// Where-Object: PowerShell-style filtering with enhanced syntax
@@ -8751,7 +8789,17 @@ fn bi_where_object(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Res
             bi_where(args, Some(input), env)
         }
         Value::Str(property) => {
-            // PowerShell-style property filtering: where Status -eq "Running"
+            // PowerShell-style property filtering: where Status -eq "Running".
+            // Property mode takes exactly property, operator, value; a fourth
+            // argument is not a flag the shell has, so it is refused rather
+            // than dropped.
+            if args.len() > 3 {
+                return Err(crate::safety::bad_arg(
+                    "Where-Object",
+                    "property, operator, value: three arguments",
+                    &format!("{}", args.len()),
+                ));
+            }
             if args.len() >= 3 {
                 filter_by_property(&input, property, &args[1], &args[2])
             } else {
@@ -8760,8 +8808,134 @@ fn bi_where_object(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Res
                 ))
             }
         }
-        _ => Err(anyhow!("Where-Object: invalid filter condition")),
+        other => Err(crate::safety::bad_arg(
+            "Where-Object",
+            "a lambda, or property, operator, value",
+            other.type_name(),
+        )),
     }
+}
+
+/// A `Where-Object` operator over one property, resolved before a row is read.
+#[derive(Clone, Copy)]
+enum PropertyComparison {
+    Equal,
+    NotEqual,
+    Greater,
+    Less,
+    GreaterOrEqual,
+    LessOrEqual,
+    Contains,
+}
+
+impl PropertyComparison {
+    /// The comparison an operator spelling asks for, or `E_BAD_ARG` when the
+    /// shell has no such operator. Resolved before the rows are read, so an
+    /// unsupported operator over an empty subject is refused rather than
+    /// answered with an empty array.
+    fn parse(operator: &str) -> Result<Self> {
+        Ok(match operator {
+            "-eq" | "==" => Self::Equal,
+            "-ne" | "!=" => Self::NotEqual,
+            "-gt" | ">" => Self::Greater,
+            "-lt" | "<" => Self::Less,
+            "-ge" | ">=" => Self::GreaterOrEqual,
+            "-le" | "<=" => Self::LessOrEqual,
+            "-like" => Self::Contains,
+            other => {
+                return Err(crate::safety::bad_arg(
+                    "Where-Object",
+                    "an operator: -eq/==, -ne/!=, -gt/>, -lt/<, -ge/>=, -le/<=, -like",
+                    &format!("`{other}`"),
+                ))
+            }
+        })
+    }
+
+    /// The spelling used in a refusal, which repeats the operator the caller
+    /// wrote back to it.
+    fn spelling(self) -> &'static str {
+        match self {
+            Self::Equal => "-eq",
+            Self::NotEqual => "-ne",
+            Self::Greater => "-gt",
+            Self::Less => "-lt",
+            Self::GreaterOrEqual => "-ge",
+            Self::LessOrEqual => "-le",
+            Self::Contains => "-like",
+        }
+    }
+
+    /// Whether this row's field matches, or `E_BAD_ARG` when the field and the
+    /// target are not a pair this operator can compare.
+    ///
+    /// `-eq`/`-ne` compare any two values for identity, which is how a row's
+    /// String is matched against a String or its Bool against a Bool. Ordering
+    /// and `-like` have a narrower domain, and a pair outside it is refused:
+    /// answering `false` there dropped every row of a comparison the caller
+    /// believed had run.
+    fn matches(self, field: &Value, target: &Value) -> Result<bool> {
+        match self {
+            Self::Equal => Ok(field == target),
+            Self::NotEqual => Ok(field != target),
+            Self::Contains => match (field, target) {
+                (Value::Str(field), Value::Str(target)) => Ok(field.contains(target.as_str())),
+                _ => Err(comparison_refused(self.spelling(), field, target)),
+            },
+            Self::Greater | Self::Less | Self::GreaterOrEqual | Self::LessOrEqual => {
+                let Some(found) = ordered_compare(field, target) else {
+                    return Err(comparison_refused(self.spelling(), field, target));
+                };
+                Ok(match self {
+                    Self::Greater => found == std::cmp::Ordering::Greater,
+                    Self::Less => found == std::cmp::Ordering::Less,
+                    Self::GreaterOrEqual => found != std::cmp::Ordering::Less,
+                    _ => found != std::cmp::Ordering::Greater,
+                })
+            }
+        }
+    }
+}
+
+/// Order two values the way `compare_values` does, or `None` when the pair has
+/// no order.
+///
+/// The type check is local because `compare_values` answers `false` for an
+/// unordered pair: that is established behaviour for `where`'s lambda
+/// conditions, which read a `Null` field as "does not match", and it is not
+/// what a `Where-Object` operator wants, where the same `false` silently drops
+/// every row of a comparison that cannot run.
+fn ordered_compare(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    let comparable = matches!(
+        (left, right),
+        (Value::Int(_), Value::Int(_))
+            | (Value::Float(_), Value::Float(_))
+            | (Value::Int(_), Value::Float(_))
+            | (Value::Float(_), Value::Int(_))
+            | (Value::Str(_), Value::Str(_))
+    );
+    if !comparable {
+        return None;
+    }
+    if compare_values(left, right, Ordering::Greater) {
+        Some(Ordering::Greater)
+    } else if compare_values(left, right, Ordering::Less) {
+        Some(Ordering::Less)
+    } else {
+        Some(Ordering::Equal)
+    }
+}
+
+/// The refusal for an operator that cannot compare this field with this
+/// target: the caller gets both types back rather than a row that quietly
+/// failed to match.
+fn comparison_refused(operator: &str, field: &Value, target: &Value) -> anyhow::Error {
+    crate::safety::bad_arg(
+        "Where-Object",
+        &format!("`{operator}` between values of comparable types"),
+        &format!("{} and {}", field.type_name(), target.type_name()),
+    )
 }
 
 fn filter_by_property(
@@ -8770,58 +8944,57 @@ fn filter_by_property(
     operator: &Value,
     target: &Value,
 ) -> Result<Value> {
-    let op_str = match operator {
-        Value::Str(s) => s.as_str(),
-        _ => {
-            return Err(crate::safety::arg_err(
-                "Where-Object: operator must be a string",
+    let operator = match operator {
+        Value::Str(operator) => PropertyComparison::parse(operator)?,
+        other => {
+            return Err(crate::safety::bad_arg(
+                "Where-Object",
+                "operator: String",
+                other.type_name(),
             ))
         }
     };
 
-    match input {
-        Value::Array(arr) => {
-            let mut results = Vec::new();
-            for item in arr {
-                if let Value::Record(record) = item {
-                    if let Some(value) = record.get(property) {
-                        let matches = match op_str {
-                            "-eq" | "==" => value == target,
-                            "-ne" | "!=" => value != target,
-                            "-gt" | ">" => {
-                                compare_values(value, target, std::cmp::Ordering::Greater)
-                            }
-                            "-lt" | "<" => compare_values(value, target, std::cmp::Ordering::Less),
-                            "-ge" | ">=" => {
-                                compare_values(value, target, std::cmp::Ordering::Greater)
-                                    || value == target
-                            }
-                            "-le" | "<=" => {
-                                compare_values(value, target, std::cmp::Ordering::Less)
-                                    || value == target
-                            }
-                            "-like" => match (value, target) {
-                                (Value::Str(v), Value::Str(t)) => v.contains(t),
-                                _ => false,
-                            },
-                            _ => {
-                                return Err(anyhow!(
-                                    "Where-Object: unsupported operator '{}'",
-                                    op_str
-                                ));
-                            }
-                        };
-
-                        if matches {
-                            results.push(item.clone());
-                        }
-                    }
-                }
-            }
-            Ok(Value::Array(results))
+    // A `-like` pattern is a String; checked before the rows, so an empty
+    // subject cannot let a pattern of the wrong type through.
+    if let PropertyComparison::Contains = operator {
+        if !matches!(target, Value::Str(_)) {
+            return Err(crate::safety::bad_arg(
+                "Where-Object",
+                "`-like` pattern: String",
+                target.type_name(),
+            ));
         }
-        _ => Ok(input.clone()),
     }
+
+    let Value::Array(rows) = input else {
+        return Err(crate::safety::bad_arg(
+            "Where-Object",
+            "an Array as the piped subject",
+            input.type_name(),
+        ));
+    };
+
+    let mut results = Vec::new();
+    for row in rows {
+        let Value::Record(record) = row else {
+            return Err(crate::safety::bad_arg(
+                "Where-Object",
+                "a Record per row",
+                row.type_name(),
+            ));
+        };
+        let Some(field) = record.get(property) else {
+            return Err(crate::safety::unknown_field(
+                property,
+                nearest_names(property, record.keys().map(|k| k.as_str())),
+            ));
+        };
+        if operator.matches(field, target)? {
+            results.push(row.clone());
+        }
+    }
+    Ok(Value::Array(results))
 }
 
 fn compare_values(a: &Value, b: &Value, expected: std::cmp::Ordering) -> bool {
@@ -8846,32 +9019,81 @@ fn bi_sort_object(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let input =
         input.ok_or_else(|| crate::safety::arg_err("Sort-Object: requires pipeline input"))?;
 
-    match input {
-        Value::Array(mut arr) => {
-            if args.is_empty() {
-                // Sort by value
-                arr.sort_by(compare_values_for_sort);
-            } else if let Value::Str(property) = &args[0] {
-                // Sort by property
-                arr.sort_by(|a, b| {
-                    let a_val = get_property_value(a, property);
-                    let b_val = get_property_value(b, property);
-                    compare_values_for_sort(&a_val, &b_val)
-                });
-            }
-            Ok(Value::Array(arr))
-        }
-        _ => Ok(input),
+    if args.len() > 1 {
+        return Err(crate::safety::bad_arg(
+            "Sort-Object",
+            "at most one property name",
+            &format!("{} arguments", args.len()),
+        ));
     }
+    let property = match args.first() {
+        None => None,
+        Some(Value::Str(property)) => Some(property.as_str()),
+        Some(other) => {
+            return Err(crate::safety::bad_arg(
+                "Sort-Object",
+                "property: String",
+                other.type_name(),
+            ))
+        }
+    };
+
+    let arr = match input {
+        Value::Array(arr) => arr,
+        other => {
+            return Err(crate::safety::bad_arg(
+                "Sort-Object",
+                "an Array as the piped subject",
+                other.type_name(),
+            ))
+        }
+    };
+
+    let Some(property) = property else {
+        // No key: sort by value, with the mixed-type ordering unchanged.
+        let mut arr = arr;
+        arr.sort_by(compare_values_for_sort);
+        return Ok(Value::Array(arr));
+    };
+
+    // Every key is read before anything is sorted, so a row the property
+    // cannot be read from refuses the whole call rather than becoming a `Null`
+    // key that orders it against values it never had. `sort_by` is stable, so
+    // rows with equal keys keep their input order.
+    let mut keyed: Vec<(Value, Value)> = Vec::with_capacity(arr.len());
+    for item in arr {
+        let key = get_property_value("Sort-Object", &item, property)?;
+        keyed.push((key, item));
+    }
+    keyed.sort_by(|(a, _), (b, _)| compare_values_for_sort(a, b));
+    Ok(Value::Array(
+        keyed.into_iter().map(|(_, item)| item).collect(),
+    ))
 }
 
-fn get_property_value(value: &Value, property: &str) -> Value {
+/// One record field, read strictly: `E_UNKNOWN_FIELD` (with the nearest real
+/// field names) when the Record does not carry it, `E_BAD_ARG` when the
+/// subject is not a Record at all.
+///
+/// Both refusals are load-bearing for the field-taking builtins. A reader that
+/// answered `""` or the whole subject for an unresolvable field made a
+/// misspelled sort key order every row equally, grouped rows under a name no
+/// row had, and measured a field that was never named -- each reported as
+/// success.
+fn get_property_value(owner: &str, value: &Value, property: &str) -> Result<Value> {
     match value {
-        Value::Record(record) => record
-            .get(property)
-            .cloned()
-            .unwrap_or(Value::Str("".to_string())),
-        _ => value.clone(),
+        Value::Record(record) => match record.get(property) {
+            Some(found) => Ok(found.clone()),
+            None => Err(crate::safety::unknown_field(
+                property,
+                nearest_names(property, record.keys().map(|k| k.as_str())),
+            )),
+        },
+        other => Err(crate::safety::bad_arg(
+            owner,
+            &format!("a Record carrying `{property}`"),
+            other.type_name(),
+        )),
     }
 }
 
@@ -8896,50 +9118,56 @@ fn bi_group_object(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let input =
         input.ok_or_else(|| crate::safety::arg_err("Group-Object: requires pipeline input"))?;
 
-    if args.is_empty() {
-        return Err(crate::safety::arg_err(
-            "Group-Object: requires property name",
-        ));
-    }
-
-    let property = match &args[0] {
-        Value::Str(s) => s,
-        _ => {
+    let property = match args.first() {
+        None => {
             return Err(crate::safety::arg_err(
-                "Group-Object: property name must be a string",
+                "Group-Object: requires property name",
+            ))
+        }
+        Some(Value::Str(s)) => s.as_str(),
+        Some(other) => {
+            return Err(crate::safety::bad_arg(
+                "Group-Object",
+                "property name: String",
+                other.type_name(),
             ))
         }
     };
 
-    match input {
-        Value::Array(arr) => {
-            // Identity (`{:?}`) keys the group, matching `unique`; the display
-            // form leads so `Name` is unchanged and String keys keep their
-            // order. The display form alone collides: `{…}`, `[len=N]`, and
-            // `1` with `"1"`.
-            let mut groups: BTreeMap<(String, String), Vec<Value>> = BTreeMap::new();
-
-            for item in arr {
-                let key = get_property_value(&item, property);
-                groups
-                    .entry((value_to_string(&key), format!("{key:?}")))
-                    .or_default()
-                    .push(item);
-            }
-
-            let mut result = Vec::new();
-            for ((name, _identity), items) in groups {
-                let mut group = BTreeMap::new();
-                group.insert("Name".to_string(), Value::Str(name));
-                group.insert("Count".to_string(), Value::Int(items.len() as i64));
-                group.insert("Group".to_string(), Value::Array(items));
-                result.push(Value::Record(group));
-            }
-
-            Ok(Value::Array(result))
+    let arr = match input {
+        Value::Array(arr) => arr,
+        other => {
+            return Err(crate::safety::bad_arg(
+                "Group-Object",
+                "an Array as the piped subject",
+                other.type_name(),
+            ))
         }
-        _ => Err(anyhow!("Group-Object: input must be an array")),
+    };
+
+    // Identity (`{:?}`) keys the group, matching `unique`; the display form
+    // leads so `Name` is unchanged and String keys keep their order. The
+    // display form alone collides: `{…}`, `[len=N]`, and `1` with `"1"`.
+    let mut groups: BTreeMap<(String, String), Vec<Value>> = BTreeMap::new();
+
+    for item in arr {
+        let key = get_property_value("Group-Object", &item, property)?;
+        groups
+            .entry((value_to_string(&key), format!("{key:?}")))
+            .or_default()
+            .push(item);
     }
+
+    let mut result = Vec::with_capacity(groups.len());
+    for ((name, _identity), items) in groups {
+        let mut group = BTreeMap::new();
+        group.insert("Name".to_string(), Value::Str(name));
+        group.insert("Count".to_string(), Value::Int(items.len() as i64));
+        group.insert("Group".to_string(), Value::Array(items));
+        result.push(Value::Record(group));
+    }
+
+    Ok(Value::Array(result))
 }
 
 /// Measure-Object: PowerShell-style measurement and statistics
@@ -8947,48 +9175,84 @@ fn bi_measure_object(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     let input =
         input.ok_or_else(|| crate::safety::arg_err("Measure-Object: requires pipeline input"))?;
 
-    match input {
-        Value::Array(arr) => {
-            let mut result = BTreeMap::new();
-            result.insert("Count".to_string(), Value::Int(arr.len() as i64));
-
-            // If property specified, calculate statistics
-            if !args.is_empty() {
-                if let Value::Str(property) = &args[0] {
-                    let values: Vec<f64> = arr
-                        .iter()
-                        .filter_map(|item| {
-                            let prop_val = get_property_value(item, property);
-                            match prop_val {
-                                Value::Int(i) => Some(i as f64),
-                                Value::Float(f) => Some(f),
-                                _ => None,
-                            }
-                        })
-                        .collect();
-
-                    if !values.is_empty() {
-                        let sum: f64 = values.iter().sum();
-                        let avg = sum / values.len() as f64;
-                        let min = values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-                        let max = values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-
-                        result.insert("Sum".to_string(), Value::Float(sum));
-                        result.insert("Average".to_string(), Value::Float(avg));
-                        result.insert("Minimum".to_string(), Value::Float(min));
-                        result.insert("Maximum".to_string(), Value::Float(max));
-                    }
-                }
-            }
-
-            Ok(Value::Record(result))
+    if args.len() > 1 {
+        return Err(crate::safety::bad_arg(
+            "Measure-Object",
+            "at most one property name",
+            &format!("{} arguments", args.len()),
+        ));
+    }
+    let property = match args.first() {
+        None => None,
+        Some(Value::Str(property)) => Some(property.as_str()),
+        Some(other) => {
+            return Err(crate::safety::bad_arg(
+                "Measure-Object",
+                "property: String",
+                other.type_name(),
+            ))
         }
-        _ => {
+    };
+
+    let arr = match input {
+        Value::Array(arr) => arr,
+        other => {
+            // Counting needs no field, and one value measures as one item.
+            if property.is_some() {
+                return Err(crate::safety::bad_arg(
+                    "Measure-Object",
+                    "an Array as the piped subject to measure a property over",
+                    other.type_name(),
+                ));
+            }
             let mut result = BTreeMap::new();
             result.insert("Count".to_string(), Value::Int(1));
-            Ok(Value::Record(result))
+            return Ok(Value::Record(result));
         }
+    };
+
+    let mut result = BTreeMap::new();
+    result.insert("Count".to_string(), Value::Int(arr.len() as i64));
+
+    // Counting needs no field: every element counts, whatever its type.
+    let Some(property) = property else {
+        return Ok(Value::Record(result));
+    };
+
+    // Each row's property must be a number. A row the property cannot be read
+    // from, or one whose value is not numeric, refuses the whole call: dropping
+    // it would report a Sum over a subset the caller never named.
+    let mut values: Vec<f64> = Vec::with_capacity(arr.len());
+    for item in &arr {
+        let value = get_property_value("Measure-Object", item, property)?;
+        let number = match value {
+            Value::Int(n) => n as f64,
+            Value::Float(f) => f,
+            other => {
+                return Err(crate::safety::bad_arg(
+                    "Measure-Object",
+                    &format!("`{property}`: a number on every row"),
+                    other.type_name(),
+                ))
+            }
+        };
+        values.push(number);
     }
+
+    // Statistics exist only over a measured value: an empty array has a Count
+    // and nothing else, rather than a fabricated NaN average.
+    if !values.is_empty() {
+        let sum: f64 = values.iter().sum();
+        let avg = sum / values.len() as f64;
+        let min = values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+        let max = values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        result.insert("Sum".to_string(), Value::Float(sum));
+        result.insert("Average".to_string(), Value::Float(avg));
+        result.insert("Minimum".to_string(), Value::Float(min));
+        result.insert("Maximum".to_string(), Value::Float(max));
+    }
+
+    Ok(Value::Record(result))
 }
 
 // =============== Nushell-style Data Commands ===============
@@ -19583,15 +19847,15 @@ fn bi_sort_by(args: Vec<Value>, input: Option<Value>, env: &mut Env) -> Result<V
         ));
     }
 
-    // Propagate key-function failures; missing record fields still use Null keys.
+    // Propagate key failures. A field no row carries is one: an implicit `Null`
+    // key sorts that row against values it never had and reports success, so
+    // the field path refuses instead. Keys are read in input order, before
+    // anything is sorted, and a later failure does not undo earlier key work.
     let mut keyed: Vec<(Value, Value)> = Vec::with_capacity(arr.len());
     for item in arr {
         let key = match (&lambda, &field) {
             (Some(l), _) => call_lambda(l, &[item.clone()], env)?,
-            (None, Some(f)) => match item {
-                Value::Record(m) => m.get(f).cloned().unwrap_or(Value::Null),
-                _ => Value::Null,
-            },
+            (None, Some(f)) => get_property_value("sort_by", item, f)?,
             (None, None) => Value::Null,
         };
         keyed.push((key, item.clone()));
