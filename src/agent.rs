@@ -71,7 +71,7 @@ pub fn plan(goal: &str) -> Result<Plan> {
     eprintln!(
         "[AGENT] Creating plan for goal: {}",
         if sanitized_goal.len() > 100 {
-            format!("{}...", &sanitized_goal[..100])
+            format!("{}...", crate::text::prefix_bytes(&sanitized_goal, 100))
         } else {
             sanitized_goal.clone()
         }
@@ -493,7 +493,7 @@ fn execute_step(tool: &str, args: &[String]) -> Result<()> {
     // Log output (truncated for security)
     if !stdout_str.is_empty() {
         let preview = if stdout_str.len() > 200 {
-            format!("{}...", &stdout_str[..200])
+            format!("{}...", crate::text::prefix_bytes(&stdout_str, 200))
         } else {
             stdout_str.to_string()
         };

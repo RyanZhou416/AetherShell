@@ -4,7 +4,7 @@ This fork is maintained at https://github.com/RyanZhou416/AetherShell and starts
 
 ## Runtime identity
 
-The source build identifies itself as `12.0.2+ryan.5`. That build-metadata suffix distinguishes it from the official `12.0.2` precompiled package without claiming a new upstream release. The lockfile pins the process-group dependency and its platform support; `encoding_rs` is already present in the dependency graph. Building this version does not replace an installed interpreter.
+The source build identifies itself as `12.0.2+ryan.6`. That build-metadata suffix distinguishes it from the official `12.0.2` precompiled package without claiming a new upstream release. The lockfile pins the process-group dependency and its platform support; `encoding_rs` is already present in the dependency graph. Building this version does not replace an installed interpreter.
 
 ## Behavior to preserve
 
@@ -20,6 +20,9 @@ The source build identifies itself as `12.0.2+ryan.5`. That build-metadata suffi
 - `file_read_text` provides bounded raw-byte snapshots with strict named encodings or BOM-selected decoding; its explicit BOM policy must not silently guess, replace malformed text or normalize newlines. `file_write_verified` encodes a String, publishes through an exclusive sibling temporary file, and rereads the target before reporting verification. Failed post-write verification reports the write honestly and never rolls back a concurrent writer. Digest preconditions are checks, not cross-process compare-and-swap. Legacy write/append/patch semantics stay unchanged and discovery states their weaker guarantees. [File text I/O](docs/api/FILE_TEXT_IO.md) owns the options and result fields.
 - Ordinary String interpolation prepares every hole in the String before evaluating any hole. Each hole must be one expression with a closing brace; parse failures and runtime failures propagate instead of becoming successful diagnostic text. Raw literals and valid ordinary interpolation, including `${'$'}`, retain their behavior. Earlier program statements and earlier evaluated holes are not rolled back on a runtime error.
 - `group_by` keeps full typed keys distinct even when their display labels match. All-Int `min`/`max` aggregates preserve native i64 precision. JSON conversion maps non-finite Float values to null rather than zero. Unicode diagnostic previews use scalar boundaries; file patch/replace rejects empty search text as a reported patch failure, preserves whitespace-only patterns, and performs no writeback when no patch applied. DSH's exact-JSON-number limit remains separate; use String values for larger identifiers.
+- Explicit JSON text ingestion (`json_parse`, `from_json`, JSON/JSONL `open`, and browser JSON input) refuses integer lexemes outside signed i64 instead of silently deriving a rounded Float. Quoted identifiers stay exact; decimal/exponent forms retain Float semantics. Other infallible internal JSON adapters are not covered by this text-ingestion check.
+- Integer operators and non-negative integer powers use checked i64 arithmetic; overflow is a coded error. Native and browser numeric paths retain exact zero for `i64::MIN % -1` and refuse saturating Float-to-Int conversions. The native mean rejects empty input; native all-Int sums use a wider subtotal so cancellation is valid before checking the final i64 result. Materialized ranges are counted before allocation, bounded at 1,000,000 items and never wrap at integer boundaries.
+- Byte-budget previews share a UTF-8-boundary prefix helper without changing ASCII output or byte limits. Conversation titles, agent/RLM summaries, CLI/TUI previews and malformed audit hashes cannot split a scalar; multibyte word editing keeps cursor character counts separate from byte positions. Credential previews fully mask non-ASCII input. These fixes do not widen file policy or require a Host restart.
 - Native CLI, Agent API, and in-memory `sess_*` session behavior remain available for the DSH adapter. Interpreter sessions are live processes, not checkpointed or replayed commands.
 
 ## Build and validation
@@ -28,6 +31,11 @@ Use a Windows x64 Visual Studio Developer PowerShell or an equivalent MSVC build
 
 ```powershell
 cargo build --release --bins --locked -j 6
+cargo test --release --locked --test fork_json_integer_bounds --test fork_numeric_limits --test fork_unicode_boundaries -j 6
+cargo test --release --locked --lib text::tests -j 6
+cargo test --release --locked --lib line_editor::tests -j 6
+cargo test --release --locked --lib persistence::tests::test_conversation_auto_title_multibyte_is_bounded -j 6
+cargo test --release --locked --bin aimodel tests::mask_key -j 6
 cargo test --release --locked --test fork_interpolation_errors --test fork_data_integrity --test fork_unicode_diagnostics --test fork_string_literals --test fork_transpiler_string_fidelity --test fork_typed_agent_api --test sessions -j 6
 cargo test --release --locked --test fork_file_read_text --test fork_file_write_verified --test fork_file_discovery --test guard_enforcement --test module_aliases --test effect_snapshot --test effect_alias_agreement --test book_builtins_are_real --test documented_builtin_count -j 6
 cargo test --release --locked --lib file_read_text::tests -j 6

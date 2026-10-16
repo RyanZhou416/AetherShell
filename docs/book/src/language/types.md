@@ -106,7 +106,7 @@ AetherShell performs automatic numeric promotion in arithmetic:
 
 | Expression | Result Type | Rule |
 |-----------|-------------|------|
-| `Int + Int` | `Int` | Integer arithmetic |
+| `Int + Int` | `Int` | Checked integer arithmetic; overflow is an error |
 | `Int + Float` | `Float` | Promote to float |
 | `Float + Float` | `Float` | Float arithmetic |
 | `Int ^ Int` (positive) | `Int` | Integer power |
@@ -114,6 +114,10 @@ AetherShell performs automatic numeric promotion in arithmetic:
 | `Int / Int` | `Float` | Always float division |
 
 Equality comparison between `Int` and `Float` works via casting. All-Int `min` and `max` aggregates keep exact native i64 values; mixed numeric arrays use floating-point semantics. This does not expand the DSH adapter's exact JSON-number range: carry larger opaque identifiers as Strings. Non-finite Float values serialize to JSON null, including inside arrays and records, rather than becoming zero.
+
+Integer addition, subtraction, multiplication, negation and non-negative integer powers refuse results outside signed i64 instead of wrapping. The mathematical remainder of `i64::MIN % -1` is returned as zero. `floor`, `ceil` and zero-digit `round` refuse non-finite or out-of-i64 results instead of saturating. An empty mean is an error; the empty sum is zero. Materialized `range` results are limited to 1,000,000 items and are sized before allocation; a nonzero negative step is supported and integer-boundary steps terminate without wrapping.
+
+JSON text parsed by `json_parse`, `from_json` or `open` for JSON/JSONL must have every integer literal within signed i64. Out-of-range literals are refused even in nested arrays and records; use quoted JSON strings for exact larger identifiers. Decimal and exponent forms retain Float semantics, not arbitrary precision. This check is specific to these text ingestion paths and does not replace every internal JSON adapter. The DSH adapter's narrower exact JSON-number limit remains unchanged.
 
 `group_by` uses the full typed field value for group identity, independently of its display label. Distinct arrays or records, and numeric `1` versus String `"1"`, remain different groups even when their `Name` labels are identical.
 

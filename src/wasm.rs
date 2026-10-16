@@ -90,6 +90,13 @@ impl AetherWasm {
     pub fn set_var(&mut self, name: &str, json: &str) -> Result<(), JsValue> {
         let value: serde_json::Value = serde_json::from_str(json)
             .map_err(|e| JsValue::from_str(&format!("JSON parse error: {}", e)))?;
+        // A native integer is 64-bit signed, so a JSON integer lexeme beyond
+        // `i64` has no exact value here; serde's `f64` fallback would round it.
+        crate::json_numbers::validate_integer_literals(json).map_err(|literal| {
+            JsValue::from_str(&format!(
+                "JSON parse error: integer {literal} outside i64; use a JSON string"
+            ))
+        })?;
         let aether_value = json_to_value(&value);
         self.env.set_var_unchecked(name, aether_value);
         Ok(())
@@ -244,7 +251,11 @@ fn eval_expr_wasm(expr: &Expr, env: &mut Env) -> Result<Value, String> {
             let val = eval_expr_wasm(e, env)?;
             match (op, &val) {
                 (UnOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
-                (UnOp::Neg, Value::Int(n)) => Ok(Value::Int(-n)),
+                (UnOp::Neg, Value::Int(n)) => {
+                    Ok(Value::Int(n.checked_neg().ok_or_else(|| {
+                        "integer overflow: negation has no i64 result".to_string()
+                    })?))
+                }
                 (UnOp::Neg, Value::Float(f)) => Ok(Value::Float(-f)),
                 _ => Err(format!("invalid unary operation on {}", val.type_name())),
             }
@@ -398,29 +409,62 @@ fn eval_lambda(lam: &Lambda, args: &[Value], env: &mut Env) -> Result<Value, Str
 #[cfg(feature = "web")]
 fn eval_binop(op: &BinOp, left: &Value, right: &Value) -> Result<Value, String> {
     match (op, left, right) {
-        (BinOp::Add, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
+        (BinOp::Add, Value::Int(a), Value::Int(b)) => {
+            Ok(Value::Int(a.checked_add(*b).ok_or_else(|| {
+                "integer overflow: addition has no i64 result".to_string()
+            })?))
+        }
         (BinOp::Add, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
         (BinOp::Add, Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 + b)),
         (BinOp::Add, Value::Float(a), Value::Int(b)) => Ok(Value::Float(a + *b as f64)),
         (BinOp::Add, Value::Str(a), Value::Str(b)) => Ok(Value::Str(format!("{}{}", a, b))),
-        (BinOp::Sub, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a - b)),
+        (BinOp::Sub, Value::Int(a), Value::Int(b)) => {
+            Ok(Value::Int(a.checked_sub(*b).ok_or_else(|| {
+                "integer overflow: subtraction has no i64 result".to_string()
+            })?))
+        }
         (BinOp::Sub, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
         (BinOp::Sub, Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 - b)),
         (BinOp::Sub, Value::Float(a), Value::Int(b)) => Ok(Value::Float(a - *b as f64)),
-        (BinOp::Mul, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a * b)),
+        (BinOp::Mul, Value::Int(a), Value::Int(b)) => {
+            Ok(Value::Int(a.checked_mul(*b).ok_or_else(|| {
+                "integer overflow: multiplication has no i64 result".to_string()
+            })?))
+        }
         (BinOp::Mul, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
         (BinOp::Mul, Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 * b)),
         (BinOp::Mul, Value::Float(a), Value::Int(b)) => Ok(Value::Float(a * *b as f64)),
-        (BinOp::Div, Value::Int(a), Value::Int(b)) if *b != 0 => Ok(Value::Int(a / b)),
+        (BinOp::Div, Value::Int(a), Value::Int(b)) if *b != 0 => Ok(Value::Int(
+            // `i64::MIN / -1` traps; the exact quotient has no i64 value.
+            a.checked_div(*b)
+                .ok_or_else(|| "integer overflow: division has no i64 result".to_string())?,
+        )),
         (BinOp::Div, Value::Float(a), Value::Float(b)) if *b != 0.0 => Ok(Value::Float(a / b)),
         (BinOp::Div, Value::Int(a), Value::Float(b)) if *b != 0.0 => {
             Ok(Value::Float(*a as f64 / b))
         }
         (BinOp::Div, Value::Float(a), Value::Int(b)) if *b != 0 => Ok(Value::Float(a / *b as f64)),
         (BinOp::Div, _, _) => Err("division by zero".to_string()),
-        (BinOp::Rem, Value::Int(a), Value::Int(b)) if *b != 0 => Ok(Value::Int(a % b)),
+        (BinOp::Rem, Value::Int(a), Value::Int(b)) if *b != 0 => {
+            // The divisor is already non-zero; the only unrepresentable
+            // remainder is `i64::MIN % -1`, which is exactly 0.
+            Ok(Value::Int(a.checked_rem(*b).unwrap_or(0)))
+        }
         (BinOp::Rem, _, _) => Err("modulo by zero".to_string()),
-        (BinOp::Pow, Value::Int(a), Value::Int(b)) => Ok(Value::Float((*a as f64).powf(*b as f64))),
+        (BinOp::Pow, Value::Int(a), Value::Int(b)) => {
+            if *b >= 0 {
+                // A non-negative integer power is exact and answers an Int,
+                // matching the native evaluator; a negative exponent keeps the
+                // pre-existing Float result, as do the Float operand arms.
+                Ok(Value::Int(
+                    crate::numeric::checked_pow_i64(*a, *b as u64).ok_or_else(|| {
+                        "integer overflow: exponentiation has no i64 result".to_string()
+                    })?,
+                ))
+            } else {
+                Ok(Value::Float((*a as f64).powf(*b as f64)))
+            }
+        }
         (BinOp::Pow, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.powf(*b))),
         (BinOp::Pow, Value::Int(a), Value::Float(b)) => Ok(Value::Float((*a as f64).powf(*b))),
         (BinOp::Pow, Value::Float(a), Value::Int(b)) => Ok(Value::Float(a.powf(*b as f64))),
@@ -556,7 +600,9 @@ fn eval_call_wasm(
         "abs" => {
             let val = require_arg(input, args, 0)?;
             match val {
-                Value::Int(n) => Ok(Value::Int(n.abs())),
+                Value::Int(n) => Ok(Value::Int(n.checked_abs().ok_or_else(|| {
+                    "abs overflow: |i64::MIN| is not representable as an Int".to_string()
+                })?)),
                 Value::Float(f) => Ok(Value::Float(f.abs())),
                 _ => Err("abs requires a number".to_string()),
             }
@@ -564,7 +610,10 @@ fn eval_call_wasm(
         "ceil" => {
             let val = require_arg(input, args, 0)?;
             match val {
-                Value::Float(f) => Ok(Value::Int(f.ceil() as i64)),
+                Value::Float(f) => Ok(Value::Int(
+                    crate::numeric::float_to_i64(f.ceil())
+                        .ok_or_else(|| "ceil: the result is not a finite i64 value".to_string())?,
+                )),
                 Value::Int(n) => Ok(Value::Int(*n)),
                 _ => Err("ceil requires a number".to_string()),
             }
@@ -572,7 +621,10 @@ fn eval_call_wasm(
         "floor" => {
             let val = require_arg(input, args, 0)?;
             match val {
-                Value::Float(f) => Ok(Value::Int(f.floor() as i64)),
+                Value::Float(f) => Ok(Value::Int(
+                    crate::numeric::float_to_i64(f.floor())
+                        .ok_or_else(|| "floor: the result is not a finite i64 value".to_string())?,
+                )),
                 Value::Int(n) => Ok(Value::Int(*n)),
                 _ => Err("floor requires a number".to_string()),
             }
@@ -580,7 +632,10 @@ fn eval_call_wasm(
         "round" => {
             let val = require_arg(input, args, 0)?;
             match val {
-                Value::Float(f) => Ok(Value::Int(f.round() as i64)),
+                Value::Float(f) => Ok(Value::Int(
+                    crate::numeric::float_to_i64(f.round())
+                        .ok_or_else(|| "round: the result is not a finite i64 value".to_string())?,
+                )),
                 Value::Int(n) => Ok(Value::Int(*n)),
                 _ => Err("round requires a number".to_string()),
             }
@@ -914,6 +969,11 @@ fn eval_call_wasm(
             if let Value::Str(s) = val {
                 let json: serde_json::Value =
                     serde_json::from_str(s).map_err(|e| format!("JSON parse error: {}", e))?;
+                // The same bound as the native `json_parse`: an integer lexeme
+                // beyond `i64` would reach the value space rounded.
+                crate::json_numbers::validate_integer_literals(s).map_err(|literal| {
+                    format!("JSON parse error: integer {literal} outside i64; use a JSON string")
+                })?;
                 Ok(json_to_value(&json))
             } else {
                 Err("parse_json requires a string".to_string())
@@ -990,17 +1050,24 @@ fn eval_call_wasm(
             if step == 0 {
                 return Err("range step cannot be zero".to_string());
             }
-            let mut arr = Vec::new();
+            // The count is decided before allocating, so the browser shares the
+            // native budget and a step that would overflow never wraps the loop.
+            let count = crate::numeric::range_len(start, end, step).ok_or_else(|| {
+                format!(
+                    "range would produce more than {} items",
+                    crate::numeric::MAX_RANGE_ITEMS
+                )
+            })?;
+            let mut arr = Vec::with_capacity(count);
             let mut i = start;
-            if step > 0 {
-                while i < end {
-                    arr.push(Value::Int(i));
-                    i += step;
+            for produced in 0..count {
+                arr.push(Value::Int(i));
+                if produced + 1 == count {
+                    break;
                 }
-            } else {
-                while i > end {
-                    arr.push(Value::Int(i));
-                    i += step;
+                match i.checked_add(step) {
+                    Some(next) => i = next,
+                    None => break,
                 }
             }
             Ok(Value::Array(arr))

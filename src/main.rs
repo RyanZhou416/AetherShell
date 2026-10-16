@@ -649,7 +649,10 @@ async fn handle_mcp_command(command: McpCommands) -> Result<()> {
             println!("{}", "-".repeat(80));
             for tool in filtered_tools {
                 let desc = if tool.description.len() > 50 {
-                    format!("{}...", &tool.description[..50])
+                    format!(
+                        "{}...",
+                        aethershell::text::prefix_bytes(&tool.description, 50)
+                    )
                 } else {
                     tool.description.clone()
                 };
@@ -760,7 +763,7 @@ fn handle_agent_api_command(command: AgentApiCommands) -> Result<()> {
                                 let desc =
                                     b.get("description").and_then(|v| v.as_str()).unwrap_or("");
                                 let desc_short = if desc.len() > 45 {
-                                    format!("{}...", &desc[..45])
+                                    format!("{}...", aethershell::text::prefix_bytes(desc, 45))
                                 } else {
                                     desc.to_string()
                                 };

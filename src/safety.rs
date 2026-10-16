@@ -2528,7 +2528,7 @@ fn detect_tail_divergence(path: &PathBuf, state: &AuditState) -> Option<String> 
                     if observed.is_empty() {
                         "an entry with no hash".to_string()
                     } else {
-                        format!("entry {}", &observed[..observed.len().min(12)])
+                        format!("entry {}", crate::text::prefix_bytes(observed, 12))
                     },
                     &state.last_hash[..state.last_hash.len().min(12)]
                 ))

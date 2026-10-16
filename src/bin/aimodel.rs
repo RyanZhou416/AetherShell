@@ -1321,6 +1321,20 @@ async fn run_backend(config: APIConfig, args: BackendArgs) -> Result<()> {
     Ok(())
 }
 
+/// Mask an API key for display.
+///
+/// An ASCII key with a middle keeps its first six and last four characters.
+/// Everything else — short keys, and any key with a non-ASCII byte — is masked
+/// entirely: a byte-index slice would split a character and panic, and the
+/// masked form must not reveal part of one.
+fn mask_key(key: &str) -> String {
+    if key.is_ascii() && key.len() > 12 {
+        format!("{}...{}", &key[..6], &key[key.len() - 4..])
+    } else {
+        "*".repeat(key.len())
+    }
+}
+
 async fn run_keys(args: KeysArgs) -> Result<()> {
     use aethershell::secure_config::SecureApiConfig;
     use std::io::{self, Write};
@@ -1364,12 +1378,7 @@ async fn run_keys(args: KeysArgs) -> Result<()> {
             )?;
 
             if let Some(key) = config.get_api_key() {
-                // Only show first/last few characters for security
-                let masked = if key.len() > 12 {
-                    format!("{}...{}", &key[..6], &key[key.len() - 4..])
-                } else {
-                    "*".repeat(key.len())
-                };
+                let masked = mask_key(key);
 
                 println!("API key for '{}': {}", provider, masked);
                 println!("Key length: {} characters", key.len());
@@ -1637,4 +1646,18 @@ fn detect_model_format(path: &str) -> Result<ModelFormat> {
     // Default fallback
     println!("Warning: Could not auto-detect format, assuming PyTorch");
     Ok(ModelFormat::PyTorch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mask_key;
+
+    #[test]
+    fn mask_key_keeps_ascii_shape_and_masks_multibyte_input() {
+        assert_eq!(mask_key("sk-abcdefghijklmn"), "sk-abc...klmn");
+        assert_eq!(mask_key("short"), "*****");
+        // A non-ASCII key never reaches a byte slice: every byte is masked,
+        // exactly as the short-key branch already did.
+        assert_eq!(mask_key("密钥密钥密钥密钥"), "*".repeat(24));
+    }
 }

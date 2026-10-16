@@ -5131,26 +5131,39 @@ fn bi_sum(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
     match arr {
         Value::Array(items) => {
-            let mut int_sum: i64 = 0;
-            let mut float_sum: f64 = 0.0;
-            let mut has_float = false;
+            // An all-Int list is summed exactly in `i128` and narrowed once, so
+            // a wrapped intermediate can neither reach the answer nor seed a
+            // later Float promotion: `sum([MAX, 1, -1])` is `MAX`, not MIN.
+            let has_float = items.iter().any(|item| matches!(item, Value::Float(_)));
+            if !has_float {
+                let mut int_sum: i128 = 0;
+                for item in &items {
+                    match item {
+                        Value::Int(n) => int_sum += *n as i128,
+                        _ => {
+                            return Err(anyhow!(
+                                "sum: array must contain only numbers, got {:?}",
+                                item
+                            ))
+                        }
+                    }
+                }
+                return match i64::try_from(int_sum) {
+                    Ok(n) => Ok(Value::Int(n)),
+                    Err(_) => Err(crate::safety::arg_err(&format!(
+                        "sum overflow: the exact total {int_sum} is outside the i64 \
+                         range. Use Float elements for larger magnitudes"
+                    ))),
+                };
+            }
 
-            for item in items {
+            // Any Float element keeps the existing f64 semantics. Every element
+            // is still validated: a non-numeric value is an error, not a drop.
+            let mut float_sum: f64 = 0.0;
+            for item in &items {
                 match item {
-                    Value::Int(n) => {
-                        if has_float {
-                            float_sum += n as f64;
-                        } else {
-                            int_sum += n;
-                        }
-                    }
-                    Value::Float(f) => {
-                        if !has_float {
-                            float_sum = int_sum as f64;
-                            has_float = true;
-                        }
-                        float_sum += f;
-                    }
+                    Value::Int(n) => float_sum += *n as f64,
+                    Value::Float(f) => float_sum += *f,
                     _ => {
                         return Err(anyhow!(
                             "sum: array must contain only numbers, got {:?}",
@@ -5159,12 +5172,7 @@ fn bi_sum(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
                     }
                 }
             }
-
-            if has_float {
-                Ok(Value::Float(float_sum))
-            } else {
-                Ok(Value::Int(int_sum))
-            }
+            Ok(Value::Float(float_sum))
         }
         _ => Err(crate::safety::arg_err(format!(
             "sum: requires an Array, got {:?}",
@@ -5235,7 +5243,11 @@ fn bi_avg(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     match arr {
         Value::Array(items) => {
             if items.is_empty() {
-                return Ok(Value::Float(f64::NAN));
+                // An empty mean has no value. NaN used to be returned here; it
+                // rendered as JSON null and became `0` through floor/round, a
+                // false success indistinguishable from a measurement. `min` and
+                // `max` already refuse an empty aggregate, so `avg` does too.
+                return Err(crate::safety::arg_err("avg of an empty array is undefined"));
             }
 
             let mut sum: f64 = 0.0;
@@ -9029,6 +9041,16 @@ fn bi_from_json(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         }
         crate::safety::bad_arg("from_json", "valid JSON", &e.to_string())
     })?;
+    // The parser kept an integer lexeme beyond `i64` as an `f64`, which rounds
+    // it before any caller sees it; the original text is still here, so the
+    // literal is refused instead.
+    crate::json_numbers::validate_integer_literals(&json_str).map_err(|literal| {
+        crate::safety::bad_arg(
+            "from_json",
+            "JSON integer literals within i64 range; encode larger exact values as JSON strings",
+            &format!("out-of-range integer {literal}"),
+        )
+    })?;
     Ok(json_to_value(parsed))
 }
 
@@ -12388,21 +12410,34 @@ fn bi_range(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
     };
 
     if step == 0 {
-        return Err(anyhow!("range step cannot be zero"));
+        return Err(crate::safety::arg_err("range step cannot be zero"));
     }
 
-    let mut result = Vec::new();
-    let mut current = start;
+    // The item count is decided in `i128` before anything is allocated: a range
+    // beyond the fixed budget is refused instead of attempted, and a step whose
+    // addition would overflow `i64` (which used to wrap the loop and never
+    // terminate) ends at its true last item.
+    let count = crate::numeric::range_len(start, end, step).ok_or_else(|| {
+        crate::safety::budget_exceeded(
+            "range",
+            format!(
+                "range would produce more than {} items",
+                crate::numeric::MAX_RANGE_ITEMS
+            ),
+            "narrow the bounds or raise the step",
+        )
+    })?;
 
-    if step > 0 {
-        while current < end {
-            result.push(Value::Int(current));
-            current += step;
+    let mut result = Vec::with_capacity(count);
+    let mut current = start;
+    for produced in 0..count {
+        result.push(Value::Int(current));
+        if produced + 1 == count {
+            break;
         }
-    } else {
-        while current > end {
-            result.push(Value::Int(current));
-            current += step;
+        match current.checked_add(step) {
+            Some(next) => current = next,
+            None => break,
         }
     }
 
@@ -12531,7 +12566,9 @@ fn bi_abs(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     };
 
     match val {
-        Value::Int(n) => Ok(Value::Int(n.abs())),
+        Value::Int(n) => Ok(Value::Int(n.checked_abs().ok_or_else(|| {
+            crate::safety::arg_err("abs overflow: |i64::MIN| is not representable as an Int")
+        })?)),
         Value::Float(f) => Ok(Value::Float(f.abs())),
         _ => Err(crate::safety::arg_err("abs requires numeric input")),
     }
@@ -12662,6 +12699,21 @@ fn bi_max(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
     }
 }
 
+/// The `Int` a rounding builtin returns, or a refusal when the Float has no
+/// finite `i64` answer.
+///
+/// `floor`, `ceil` and `round` document an `Int` return, so a non-finite or
+/// out-of-range input cannot be answered with a Float; a saturating `as` cast
+/// answered `i64::MAX` instead, which is a number the input never had.
+fn float_rounded(name: &str, value: f64) -> Result<i64> {
+    crate::numeric::float_to_i64(value).ok_or_else(|| {
+        crate::safety::arg_err(&format!(
+            "{name}: the result is not a finite i64 value; the input is non-finite \
+             or outside the Int range"
+        ))
+    })
+}
+
 /// floor(number) - Round down to nearest integer
 /// Args:
 ///   - number: Number
@@ -12678,7 +12730,7 @@ fn bi_floor(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
     match val {
         Value::Int(n) => Ok(Value::Int(n)),
-        Value::Float(f) => Ok(Value::Int(f.floor() as i64)),
+        Value::Float(f) => Ok(Value::Int(float_rounded("floor", f.floor())?)),
         _ => Err(crate::safety::arg_err("floor requires numeric input")),
     }
 }
@@ -12699,7 +12751,7 @@ fn bi_ceil(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
     match val {
         Value::Int(n) => Ok(Value::Int(n)),
-        Value::Float(f) => Ok(Value::Int(f.ceil() as i64)),
+        Value::Float(f) => Ok(Value::Int(float_rounded("ceil", f.ceil())?)),
         _ => Err(crate::safety::arg_err("ceil requires numeric input")),
     }
 }
@@ -12745,12 +12797,30 @@ fn bi_round(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
         }
     };
 
+    // Every form of `round` needs a finite Float: NaN and infinity have no
+    // integer value, and the digits form has no finite scaled value either.
+    if matches!(&val, Value::Float(f) if !f.is_finite()) {
+        return Err(crate::safety::arg_err(
+            "round: requires a finite Float; NaN and infinity have no integer value",
+        ));
+    }
+
     match (val, digits) {
         (Value::Int(n), _) => Ok(Value::Int(n)),
-        (Value::Float(f), None) | (Value::Float(f), Some(0)) => Ok(Value::Int(f.round() as i64)),
+        (Value::Float(f), None) | (Value::Float(f), Some(0)) => {
+            Ok(Value::Int(float_rounded("round", f.round())?))
+        }
         (Value::Float(f), Some(d)) => {
             let scale = 10f64.powi(d as i32);
-            Ok(Value::Float((f * scale).round() / scale))
+            let scaled = f * scale;
+            // A finite input can still overflow to infinity once scaled; that
+            // is refused rather than rendered as a silent JSON null.
+            if !scaled.is_finite() {
+                return Err(crate::safety::arg_err(
+                    "round: scaling by the requested digits is not finite for this input",
+                ));
+            }
+            Ok(Value::Float(scaled.round() / scale))
         }
         _ => Err(crate::safety::arg_err("round requires numeric input")),
     }
@@ -12791,20 +12861,47 @@ fn bi_sqrt(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 ///
 /// Example:
 ///   pow(2, 8)     # Returns 256
-fn bi_pow(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
-    if args.len() < 2 {
-        return Err(crate::safety::arg_err(
-            "pow requires two arguments: base and exponent",
-        ));
+fn bi_pow(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
+    // The declared form is a Numeric subject plus an exponent, so both
+    // `pow(2, 3)` and `2 | pow(3)` are supported here, matching the WASM
+    // runtime, which already accepted either.
+    let (base_arg, exp_arg) = match (input, args.len()) {
+        (Some(base), 1) => (base, args[0].clone()),
+        (Some(_), 0) => {
+            return Err(crate::safety::arg_err(
+                "pow requires an exponent: pow(base, exponent) or base | pow(exponent)",
+            ))
+        }
+        (_, n) if n >= 2 => (args[0].clone(), args[1].clone()),
+        _ => {
+            return Err(crate::safety::arg_err(
+                "pow requires two arguments: base and exponent",
+            ))
+        }
+    };
+
+    if let (Value::Int(b), Value::Int(e)) = (&base_arg, &exp_arg) {
+        if *e >= 0 {
+            // Exact integer power for a non-negative exponent: `pow(2, 64)` used
+            // to answer i64::MAX through a saturating cast, and `pow(large, 1)`
+            // must return `large` unchanged.
+            return match crate::numeric::checked_pow_i64(*b, *e as u64) {
+                Some(n) => Ok(Value::Int(n)),
+                None => Err(crate::safety::arg_err(
+                    "pow overflow: the exact integer result is outside the i64 range. \
+                     Use Float operands for larger magnitudes",
+                )),
+            };
+        }
     }
 
-    let base = match &args[0] {
+    let base = match &base_arg {
         Value::Int(n) => *n as f64,
         Value::Float(f) => *f,
         _ => return Err(crate::safety::arg_err("pow requires numeric base")),
     };
 
-    let exp = match &args[1] {
+    let exp = match &exp_arg {
         Value::Int(n) => *n as f64,
         Value::Float(f) => *f,
         _ => return Err(crate::safety::arg_err("pow requires numeric exponent")),
@@ -12812,9 +12909,12 @@ fn bi_pow(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
 
     let result = base.powf(exp);
 
-    // Return Int if result is a whole number and both inputs were Int
-    if matches!((&args[0], &args[1]), (Value::Int(_), Value::Int(_))) && result.fract() == 0.0 {
-        Ok(Value::Int(result as i64))
+    // Return Int if the result is a whole number and both inputs were Int.
+    if matches!((&base_arg, &exp_arg), (Value::Int(_), Value::Int(_))) && result.fract() == 0.0 {
+        match crate::numeric::float_to_i64(result) {
+            Some(n) => Ok(Value::Int(n)),
+            None => Ok(Value::Float(result)),
+        }
     } else {
         Ok(Value::Float(result))
     }
@@ -12966,6 +13066,15 @@ fn bi_json_parse(args: Vec<Value>, input: Option<Value>) -> Result<Value> {
 
     let json_val: serde_json::Value = serde_json::from_str(&json_str)
         .map_err(|e| crate::safety::bad_arg("json_parse", "valid JSON", &e.to_string()))?;
+    // Same bound as `from_json`: an integer lexeme beyond `i64` reached the
+    // value space rounded, so it is refused while the literal is still readable.
+    crate::json_numbers::validate_integer_literals(&json_str).map_err(|literal| {
+        crate::safety::bad_arg(
+            "json_parse",
+            "JSON integer literals within i64 range; encode larger exact values as JSON strings",
+            &format!("out-of-range integer {literal}"),
+        )
+    })?;
 
     Ok(json_to_value(json_val))
 }
@@ -22456,6 +22565,15 @@ fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
         "json" => {
             let j: serde_json::Value =
                 serde_json::from_str(&text).map_err(|e| bad("JSON", e.to_string()))?;
+            // A file is the likeliest place for an exact large id, so the same
+            // refusal applies here rather than only to inline text.
+            crate::json_numbers::validate_integer_literals(&text).map_err(|literal| {
+                crate::safety::bad_arg(
+                    "open",
+                    "JSON integer literals within i64 range; encode larger exact values as JSON strings",
+                    &format!("out-of-range integer {literal}"),
+                )
+            })?;
             Ok(Value::from_json(&j))
         }
         "jsonl" | "ndjson" => {
@@ -22463,6 +22581,13 @@ fn bi_open(args: Vec<Value>, _input: Option<Value>) -> Result<Value> {
             for line in text.lines().filter(|l| !l.trim().is_empty()) {
                 let j: serde_json::Value =
                     serde_json::from_str(line).map_err(|e| bad("JSON lines", e.to_string()))?;
+                crate::json_numbers::validate_integer_literals(line).map_err(|literal| {
+                    crate::safety::bad_arg(
+                        "open",
+                        "JSON integer literals within i64 range; encode larger exact values as JSON strings",
+                        &format!("out-of-range integer {literal}"),
+                    )
+                })?;
                 rows.push(Value::from_json(&j));
             }
             Ok(Value::Array(rows))

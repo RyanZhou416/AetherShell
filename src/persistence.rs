@@ -161,7 +161,7 @@ impl Conversation {
             {
                 let content = &first_user_msg.content;
                 let title = if content.len() > 50 {
-                    format!("{}...", &content[..47])
+                    format!("{}...", crate::text::prefix_bytes(content, 47))
                 } else {
                     content.clone()
                 };
@@ -1332,6 +1332,28 @@ mod tests {
 
         assert!(conv.title.as_ref().unwrap().len() <= 50);
         assert!(conv.title.as_ref().unwrap().ends_with("..."));
+    }
+
+    #[test]
+    fn test_conversation_auto_title_multibyte_is_bounded() {
+        // 51 bytes of CJK: past the 50-byte guard, and byte 47 falls inside a
+        // character, so the old prefix slice panicked here.
+        let mut conv = Conversation::new("agent-1".to_string());
+        conv.add_message(Message::user(&"中".repeat(17)));
+        conv.auto_title();
+
+        let title = conv.title.as_ref().unwrap();
+        assert!(title.len() <= 50);
+        assert!(title.starts_with('中'));
+        assert!(title.ends_with("..."));
+
+        let mut emoji = Conversation::new("agent-2".to_string());
+        emoji.add_message(Message::user(&"😀".repeat(20)));
+        emoji.auto_title();
+
+        let title = emoji.title.as_ref().unwrap();
+        assert!(title.len() <= 50);
+        assert!(title.ends_with("..."));
     }
 
     #[test]

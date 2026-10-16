@@ -841,7 +841,10 @@ pub fn eval_expr(expr: &Expr, env: &mut Env) -> Result<Value> {
         Expr::Unary { op, expr } => {
             let v = eval_expr(expr, env)?;
             match (op, v) {
-                (UnOp::Neg, Value::Int(n)) => Ok(Value::Int(-n)),
+                (UnOp::Neg, Value::Int(n)) => Ok(Value::Int(
+                    n.checked_neg()
+                        .ok_or_else(|| integer_overflow("negation"))?,
+                )),
                 (UnOp::Neg, Value::Float(x)) => Ok(Value::Float(-x)),
                 (UnOp::Not, v) => Ok(Value::Bool(!is_truthy(&v))),
                 (_, other) => Err(crate::safety::bad_arg(
@@ -1167,6 +1170,20 @@ fn divide_by_zero(what: &str) -> anyhow::Error {
     crate::safety::arg_err(&format!(
         "{what} by zero: the divisor evaluated to 0. Guard the divisor, or \
          filter the empty case before dividing"
+    ))
+}
+
+/// The refusal every checked integer operation gives when its exact result is
+/// not representable in `i64`.
+///
+/// Wrapping answered a different question under the same exit status, so an
+/// agent could not tell `9223372036854775807 + 1` from `-9223372036854775807`.
+/// Float operands are how a caller asks for arbitrary magnitude, so an
+/// operation that stays in `Int` refuses instead of changing its answer.
+fn integer_overflow(op: &str) -> anyhow::Error {
+    crate::safety::arg_err(&format!(
+        "integer overflow: {op} has no i64 result. Use Float operands for \
+         larger magnitudes"
     ))
 }
 
@@ -1671,7 +1688,10 @@ fn value_eq(a: &Value, b: &Value) -> bool {
 fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
     use BinOp::*;
     Ok(match (op, a, b) {
-        (Add, Value::Int(x), Value::Int(y)) => Value::Int(x + y),
+        (Add, Value::Int(x), Value::Int(y)) => Value::Int(
+            x.checked_add(y)
+                .ok_or_else(|| integer_overflow("addition"))?,
+        ),
         (Add, Value::Float(x), Value::Float(y)) => Value::Float(x + y),
         (Add, Value::Int(x), Value::Float(y)) => Value::Float((x as f64) + y),
         (Add, Value::Float(x), Value::Int(y)) => Value::Float(x + (y as f64)),
@@ -1682,12 +1702,18 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
         (Add, Value::Int(x), Value::Str(y)) => checked_string(format!("{}{}", x, y))?,
         (Add, Value::Float(x), Value::Str(y)) => checked_string(format!("{}{}", x, y))?,
 
-        (Sub, Value::Int(x), Value::Int(y)) => Value::Int(x - y),
+        (Sub, Value::Int(x), Value::Int(y)) => Value::Int(
+            x.checked_sub(y)
+                .ok_or_else(|| integer_overflow("subtraction"))?,
+        ),
         (Sub, Value::Float(x), Value::Float(y)) => Value::Float(x - y),
         (Sub, Value::Int(x), Value::Float(y)) => Value::Float((x as f64) - y),
         (Sub, Value::Float(x), Value::Int(y)) => Value::Float(x - (y as f64)),
 
-        (Mul, Value::Int(x), Value::Int(y)) => Value::Int(x * y),
+        (Mul, Value::Int(x), Value::Int(y)) => Value::Int(
+            x.checked_mul(y)
+                .ok_or_else(|| integer_overflow("multiplication"))?,
+        ),
         (Mul, Value::Float(x), Value::Float(y)) => Value::Float(x * y),
         (Mul, Value::Int(x), Value::Float(y)) => Value::Float((x as f64) * y),
         (Mul, Value::Float(x), Value::Int(y)) => Value::Float(x * (y as f64)),
@@ -1716,7 +1742,7 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
         (Div, Value::Int(x), Value::Float(y)) => Value::Float((x as f64) / y),
         (Div, Value::Float(x), Value::Int(y)) => Value::Float(x / (y as f64)),
 
-        (Rem, Value::Int(x), Value::Int(y)) => Value::Int(x % y),
+        (Rem, Value::Int(x), Value::Int(y)) => Value::Int(x.checked_rem(y).unwrap_or(0)),
 
         (Eq, x, y) => Value::Bool(value_eq(&x, &y)),
         (Ne, x, y) => Value::Bool(!value_eq(&x, &y)),
@@ -1736,8 +1762,13 @@ fn binop(op: &BinOp, a: Value, b: Value) -> Result<Value> {
         // Power: numeric exponentiation. Promote to float when necessary.
         (Pow, Value::Int(x), Value::Int(y)) => {
             if y >= 0 {
-                // use integer pow for non-negative integer exponents
-                Value::Int(x.pow(y as u32))
+                // Exact integer power for a non-negative exponent, by squaring.
+                // `1 ^ 4294967296` fits and must not truncate the exponent, and
+                // `2 ^ 64` has no i64 answer where `x.pow(y as u32)` wrapped.
+                Value::Int(
+                    crate::numeric::checked_pow_i64(x, y as u64)
+                        .ok_or_else(|| integer_overflow("exponentiation"))?,
+                )
             } else {
                 // negative exponent -> float result
                 Value::Float((x as f64).powf(y as f64))

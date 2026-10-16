@@ -715,7 +715,7 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
 
                 let timestamp = msg.timestamp.format("%H:%M:%S");
                 let content_preview = if msg.content.len() > 80 {
-                    format!("{}...", &msg.content[..77])
+                    format!("{}...", crate::text::prefix_bytes(&msg.content, 77))
                 } else {
                     msg.content.clone()
                 };

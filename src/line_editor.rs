@@ -153,13 +153,16 @@ impl LineState {
     }
 
     /// The word immediately before the cursor, used for abbreviation expansion.
+    ///
+    /// The returned start is a character index, matching `cursor`, so callers
+    /// address it through [`Self::byte_at`] rather than slicing with it.
     fn word_before_cursor(&self) -> (usize, String) {
         let upto: String = self.buffer.chars().take(self.cursor).collect();
-        let start = upto
+        let at = upto
             .rfind(|c: char| c.is_whitespace() || c == '|')
-            .map(|i| i + 1)
+            .and_then(|i| upto[i..].chars().next().map(|c| i + c.len_utf8()))
             .unwrap_or(0);
-        (start, upto[start..].to_string())
+        (upto[..at].chars().count(), upto[at..].to_string())
     }
 
     /// Expand the word before the cursor if it is a registered abbreviation.
@@ -216,9 +219,11 @@ impl LineState {
     fn delete_word(&mut self) {
         let upto: String = self.buffer.chars().take(self.cursor).collect();
         let trimmed = upto.trim_end();
+        // Step over the whole whitespace character: `i + 1` lands inside a
+        // multi-byte space (U+3000, U+00A0) and the slice below would panic.
         let start = trimmed
             .rfind(char::is_whitespace)
-            .map(|i| i + 1)
+            .and_then(|i| trimmed[i..].chars().next().map(|c| i + c.len_utf8()))
             .unwrap_or(0);
         let start_chars = upto[..start].chars().count();
         let start_byte = self.byte_at(start_chars);
@@ -747,5 +752,37 @@ mod tests {
         let mut s = LineState::default();
         type_str(&mut s, "oops");
         assert_eq!(apply_key(&mut s, EditKey::Cancel), EditAction::Cancelled);
+    }
+
+    #[test]
+    fn delete_word_steps_over_a_multibyte_space() {
+        // U+3000 is three bytes: word arithmetic that adds one byte lands
+        // inside it and panics.
+        let mut s = LineState::default();
+        type_str(&mut s, "echo");
+        apply_key(&mut s, EditKey::Char('\u{3000}'));
+        type_str(&mut s, "中");
+        apply_key(&mut s, EditKey::DeleteWord);
+        assert_eq!(s.buffer, "echo\u{3000}");
+        assert_eq!(s.cursor, 5);
+    }
+
+    #[test]
+    fn abbreviation_lookup_after_a_multibyte_space() {
+        let mut s = LineState::default();
+        s.abbreviations.insert("gs".into(), "git.status()".into());
+        type_str(&mut s, "gs");
+        apply_key(&mut s, EditKey::Char('\u{3000}'));
+        apply_key(&mut s, EditKey::Space);
+        assert_eq!(s.buffer, "gs\u{3000} ");
+    }
+
+    #[test]
+    fn abbreviation_expansion_replaces_the_whole_multibyte_word() {
+        let mut s = LineState::default();
+        s.abbreviations.insert("gs".into(), "git.status()".into());
+        type_str(&mut s, "é gs");
+        apply_key(&mut s, EditKey::Space);
+        assert_eq!(s.buffer, "é git.status() ");
     }
 }

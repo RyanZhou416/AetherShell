@@ -8,7 +8,7 @@
 - **Tagline**: One language, every platform, deterministic typed output
 - **Binary**: `ae`
 - **Language**: Rust
-- **Source build**: 12.0.2+ryan.5
+- **Source build**: 12.0.2+ryan.6
 - **Repository**: https://github.com/nervosys/AetherShell
 - **License**: AGPL-3.0-or-later
 - **File Extension**: `.ae`
@@ -52,6 +52,8 @@ proc_run(["git", "--version"], {encoding: "utf-8"})
 ```
 
 Use raw strings for opaque text. Ordinary interpolation holes require exactly one expression and a closing brace; syntax or evaluation failures fail the operation rather than becoming successful error text. Ordinary double quotes interpret `\\`, `\"`, `\n`, `\r` and `\t`; an unknown escape or missing closing quote is an error. Ordinary single quotes preserve backslashes but still interpolate `${...}`. `proc_run` keeps output bytes as base64 and reports decoding separately from process success; use `encoding: "bytes"` to avoid decoding. [Process execution](docs/api/PROCESS_RUN.md) documents bounds and result fields.
+
+Exact native integers use signed i64. Integer arithmetic overflow is an error, not wrapping; JSON text ingestion rejects larger integer literals rather than silently rounding them. Keep larger exact identifiers quoted as JSON strings, and remember that the DSH adapter has its own narrower exact-number limit. `avg([])` is an error, `sum([])` is zero, and a materialized `range` is bounded at 1,000,000 items before allocation.
 
 ### Option 2: Call the Agent API (HTTP)
 

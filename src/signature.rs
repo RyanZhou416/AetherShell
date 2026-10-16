@@ -264,7 +264,7 @@ pub static SIGNATURES: &[Signature] = &[
             "decimal places; 0 returns an Int",
         )],
         returns: "Number",
-        doc: "Round a number, optionally to a number of decimal places.",
+        doc: "Round a number, optionally to a number of decimal places. Zero or omitted digits returns signed i64; non-finite input and an out-of-range Int result are E_BAD_ARG rather than saturation. Positive digits returns Float and refuses an overflowing finite calculation.",
         examples: &[
             ("round(4.966, 2)", "4.97"),
             ("4.966 | round(2)", "4.97"),
@@ -386,7 +386,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Array),
         params: &[],
         returns: "Number",
-        doc: "Total of a numeric array.",
+        doc: "Total of a numeric array. Empty input returns Int 0. All-Int arrays accumulate exactly and return E_BAD_ARG when the final total is outside signed i64; mixed arrays use Float semantics.",
         examples: &[("[1, 2, 3] | sum", "6")],
     },
     Signature {
@@ -469,7 +469,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Str),
         params: &[],
         returns: "Any",
-        doc: "Parse a JSON string into typed values.",
+        doc: "Parse a JSON string into typed values. Integer literals must fit signed i64; an out-of-range integer is E_BAD_ARG, not a rounded Float. Quote larger exact identifiers as JSON strings. Decimal and exponent forms retain Float semantics.",
         examples: &[
             (r#"cat("issues.json") | from_json | len"#, "500"),
             (r#""[1, 2]" | from_json"#, "[1, 2]"),
@@ -509,7 +509,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Array),
         params: &[],
         returns: "Float",
-        doc: "Arithmetic mean of a numeric array.",
+        doc: "Arithmetic mean of a non-empty numeric array, using Float arithmetic. Empty input is E_BAD_ARG, not a successful NaN value.",
         examples: &[
             ("[1, 2, 3, 4] | mean", "2.5"),
             ("[1, 2] | avg | round(2)", "1.5"),
@@ -946,7 +946,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Numeric),
         params: &[],
         returns: "Number",
-        doc: "Absolute value of a number.",
+        doc: "Absolute value of a number. abs(i64::MIN) is E_BAD_ARG because its positive value does not fit signed i64; it never wraps to a negative answer.",
         examples: &[("abs(-2)", "2")],
     },
     Signature {
@@ -968,7 +968,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Numeric),
         params: &[req("exponent", Ty::Numeric, "the power to raise to")],
         returns: "Number",
-        doc: "Raise a number to a power.",
+        doc: "Raise a number to a power, positionally or with a piped base. Two Int operands with a non-negative exponent use exact checked i64 arithmetic; overflow is E_BAD_ARG, not a wrapped or saturated value. Other numeric forms use Float semantics.",
         examples: &[("pow(2, 3)", "8")],
     },
     Signature {
@@ -979,7 +979,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Numeric),
         params: &[],
         returns: "Int",
-        doc: "Largest integer not greater than a number.",
+        doc: "Largest signed-i64 integer not greater than a number. Non-finite input or an out-of-range rounded result is E_BAD_ARG, not a saturated boundary value.",
         examples: &[("floor(2.7)", "2")],
     },
     Signature {
@@ -990,7 +990,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Numeric),
         params: &[],
         returns: "Int",
-        doc: "Smallest integer not less than a number.",
+        doc: "Smallest signed-i64 integer not less than a number. Non-finite input or an out-of-range rounded result is E_BAD_ARG, not a saturated boundary value.",
         examples: &[("ceil(2.1)", "3")],
     },
     Signature {
@@ -999,10 +999,10 @@ pub static SIGNATURES: &[Signature] = &[
         subject_required: false,
         aliases: &[],
         subject: None,
-        params: &[req("start_or_count", Ty::Int, "count when alone, start when an end follows"), opt("end", Ty::Int, "exclusive upper bound")],
+        params: &[req("start_or_count", Ty::Int, "count when alone, start when an end follows"), opt("end", Ty::Int, "exclusive end bound"), opt("step", Ty::Int, "nonzero signed step; default 1")],
         returns: "Array",
-        doc: "A range of integers: range(n) is 0..n, range(a, b) is a..b.",
-        examples: &[("range(3) | len", "3"), ("range(1, 4) | first", "1")],
+        doc: "A materialized integer range: range(n) is 0..n; range(start, end, step?) excludes end. Step may be negative but not zero. At most 1000000 items are allowed; a larger range returns E_BUDGET_EXCEEDED before allocation. Integer-boundary steps terminate without wrapping.",
+        examples: &[("range(3) | len", "3"), ("range(1, 4) | first", "1"), ("range(5, 0, -2)", "[5, 3, 1]")],
     },
     Signature {
         name: "typeof",
@@ -1132,7 +1132,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: None,
         params: &[req("path", Ty::Str, "a file; .json, .jsonl, .toml, .yaml/.yml and .csv are parsed")],
         returns: "Any",
-        doc: "Read a file and parse it by extension (JSON, JSON lines, TOML, YAML, CSV), or return its text.",
+        doc: "Read a file and parse it by extension (JSON, JSON lines, TOML, YAML, CSV), or return its text. JSON and JSON-lines integer literals must fit signed i64; otherwise E_BAD_ARG is returned instead of rounding to Float. Quote larger exact identifiers as JSON strings; decimal/exponent forms retain Float semantics.",
         examples: &[
             (r#"open("Cargo.toml").package.name"#, r#""aethershell""#),
             (r#"typeof(open("README.md"))"#, "String"),
@@ -2898,7 +2898,7 @@ pub static SIGNATURES: &[Signature] = &[
         subject: Some(Ty::Str),
         params: &[],
         returns: "Any",
-        doc: "Parse a JSON string, piped or passed as the single argument, into typed values. JSON null becomes null rather than a string.",
+        doc: "Parse a JSON string, piped or passed as the single argument, into typed values. JSON null becomes null rather than a string. Integer literals must fit signed i64, including inside arrays and records; otherwise E_BAD_ARG is returned instead of rounding to Float. Quote larger exact identifiers as JSON strings. Decimal and exponent forms retain Float semantics.",
         examples: &[
             (r#"json_parse("null")"#, "null"),
             (r#"typeof(json_parse("null"))"#, "Null"),

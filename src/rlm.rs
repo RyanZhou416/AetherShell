@@ -720,7 +720,11 @@ impl RecursiveAgent {
                 "[RLM] {} spawning child {} for: {}",
                 self.id,
                 child_id,
-                if goal.len() > 50 { &goal[..50] } else { goal }
+                if goal.len() > 50 {
+                    crate::text::prefix_bytes(goal, 50)
+                } else {
+                    goal
+                }
             );
         }
 
@@ -930,7 +934,11 @@ Spawning rules:
                         eprintln!(
                             "[RLM] {} final output: {}",
                             self.id,
-                            if out.len() > 100 { &out[..100] } else { &out }
+                            if out.len() > 100 {
+                                crate::text::prefix_bytes(&out, 100)
+                            } else {
+                                &out
+                            }
                         );
                     }
 
@@ -1034,7 +1042,7 @@ Spawning rules:
                     result.steps_taken,
                     result.execution_time_ms,
                     if result.output.len() > 200 {
-                        format!("{}...", &result.output[..200])
+                        format!("{}...", crate::text::prefix_bytes(&result.output, 200))
                     } else {
                         result.output.clone()
                     }

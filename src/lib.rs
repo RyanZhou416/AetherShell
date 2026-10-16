@@ -113,8 +113,14 @@ pub mod yaml;
 // Core modules available in both native and WASM builds
 /// String interpolation — the shared `${...}` template scanner.
 pub mod interpolation;
+/// JSON integer literal bounds — an integer lexeme beyond `i64` is refused, not rounded.
+pub mod json_numbers;
+/// Numeric limits — exact integer arithmetic, cast bounds, and range sizing.
+pub mod numeric;
 /// Shell feature flags — runtime capability detection.
 pub mod shell_features;
+/// UTF-8-safe byte-budgeted string prefixes.
+pub mod text;
 /// Type checker — Hindley-Milner type inference engine.
 pub mod typecheck;
 
