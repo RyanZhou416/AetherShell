@@ -28,6 +28,8 @@ let z = x + y    # Float (auto-promoted)
 
 Integer literals and integer match patterns must fit signed i64; out-of-range text is `E_PARSE`, not zero. The integer suffixes `k`/`K`, `M` and `G` multiply by 1,000, 1,000,000 and 1,000,000,000 with the same range check; they never saturate. A minus after an expression is subtraction regardless of spacing: `5-3`, `5 -3` and `5 - 3` all produce `2`. For an unambiguous negative function argument, use parentheses, such as `abs(-7)`, rather than bare word-call syntax. Newlines remain whitespace, so use a semicolon where a separate negative expression is intended.
 
+Scientific notation uses `e` or `E` with an optional exponent sign: `1e3`, `1E+3`, `1.25e-2` and `-2e3` are each one Float literal. A decimal point may precede the exponent, including the trailing-dot spelling `1.e2`. Scientific notation always produces Float, even when the value is a whole number. An exponent without digits (`1e`, `1e+`, `1e-`) is `E_PARSE`; unsupported attached forms such as `1e3foo`, `0x10`, `1_000` or `1.5k` are also refused rather than split into separate expressions. Source Float literals must be finite, so `1e309` is a parse error. Float precision, subnormals and underflow follow f64 semantics; arithmetic can still produce non-finite Float results, whose JSON rendering is null.
+
 Integer division always produces a Float:
 
 ```ae

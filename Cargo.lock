@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "aethershell"
-version = "12.0.2+ryan.7"
+version = "12.0.2+ryan.8"
 dependencies = [
  "aes-gcm",
  "agentic-eval",

@@ -260,7 +260,10 @@ try {
         @{ Id = 'A20'; Name = 'descending-range-step-is-discoverable'; Code = 'range(5,0,-2)'; Want = '[5,3,1]' },
         @{ Id = 'A21'; Name = 'piped-power-keeps-base-and-exponent'; Code = '2 | pow(3)'; Want = '8' },
         @{ Id = 'A27'; Name = 'unspaced-subtraction-reaches-assignment'; Code = 'x = 5-3; x'; Want = '2' },
-        @{ Id = 'A32'; Name = 'negative-function-arguments-remain-explicit'; Code = 'abs(-7)'; Want = '7' }
+        @{ Id = 'A32'; Name = 'negative-function-arguments-remain-explicit'; Code = 'abs(-7)'; Want = '7' },
+        @{ Id = 'A36'; Name = 'scientific-notation-is-one-assigned-value'; Code = 'x = 1e3; x'; Want = '1000' },
+        @{ Id = 'A37'; Name = 'fractional-scientific-exponent-keeps-its-sign'; Code = '1.25e-2'; Want = '0.0125' },
+        @{ Id = 'A38'; Name = 'scientific-notation-is-a-float'; Code = 'type_of(1e3)'; Want = '"Float"' }
     )
     foreach ($expression in $expressions) {
         $run = Invoke-Ae -Arguments @('--deterministic', '-c', $expression.Code)
@@ -290,7 +293,11 @@ try {
         @{ Id = 'A11'; Name = 'malformed-interpolation-is-a-parse-error'; Code = '"answer ${1+}"' },
         @{ Id = 'A28'; Name = 'source-integer-overflow-is-a-parse-error'; Code = '9223372036854775808' },
         @{ Id = 'A29'; Name = 'scaled-integer-overflow-is-a-parse-error'; Code = '9223372036854776k' },
-        @{ Id = 'A33'; Name = 'overflowing-match-pattern-is-refused'; Code = 'match 0 { 9223372036854775808 => "wrong", _ => "other" }' }
+        @{ Id = 'A33'; Name = 'overflowing-match-pattern-is-refused'; Code = 'match 0 { 9223372036854775808 => "wrong", _ => "other" }' },
+        @{ Id = 'A39'; Name = 'incomplete-scientific-exponent-is-refused'; Code = 'x = 1e+; x' },
+        @{ Id = 'A40'; Name = 'numeric-tail-is-not-an-ignored-identifier'; Code = 'x = 1e3foo; x' },
+        @{ Id = 'A41'; Name = 'float-literal-overflow-is-refused'; Code = '1e309' },
+        @{ Id = 'A42'; Name = 'unsupported-underscore-literal-is-not-partial'; Code = 'x = 1_000; x' }
     )) {
         $run = Invoke-Ae -Arguments @('--deterministic', '-c', $invalid.Code)
         Add-Result $invalid.Id $invalid.Name ((-not $run.TimedOut) -and ($run.ExitCode -ne 0) -and ($run.Err -match 'E_PARSE')) "exit=$($run.ExitCode)"
@@ -431,7 +438,7 @@ try {
         }
     }
 
-    $expectedIds = @('A1','A2','A3','A4','A5','A6','A7','A8','A9','A10','A11','A12','A13','A14','A15','A16','A17','A18','A19','A20','A21','A22','A23','A24','A25','A26','A27','A28','A29','A30','A31','A32','A33','A34','A35','B1','B2','B3','B4','B5','B6','B7','B8','B9','B10','B11','S1','S2','S3','S4','S5','S6')
+    $expectedIds = @('A1','A2','A3','A4','A5','A6','A7','A8','A9','A10','A11','A12','A13','A14','A15','A16','A17','A18','A19','A20','A21','A22','A23','A24','A25','A26','A27','A28','A29','A30','A31','A32','A33','A34','A35','A36','A37','A38','A39','A40','A41','A42','B1','B2','B3','B4','B5','B6','B7','B8','B9','B10','B11','S1','S2','S3','S4','S5','S6')
     $actualIds = @($script:Checks | ForEach-Object { $_.id })
     if ($actualIds.Count -ne $expectedIds.Count -or @(Compare-Object $expectedIds $actualIds).Count -ne 0) {
         Add-Result 'Z0' 'all-required-checks-ran' $false "expected $($expectedIds.Count) checks; observed $($actualIds.Count)"

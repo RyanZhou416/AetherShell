@@ -1217,7 +1217,7 @@ fn get_type_definitions() -> Vec<TypeDefinition> {
         },
         TypeDefinition {
             name: "Float".to_string(),
-            description: "64-bit floating point number".to_string(),
+            description: "64-bit floating point number. Source decimal and e/E exponent literals must be finite; malformed exponents, unsupported attached numeric tails and literal overflow are E_PARSE. Scientific notation always produces Float; precision, subnormals and underflow follow f64 semantics.".to_string(),
             json_equivalent: "number".to_string(),
             examples: vec!["3.14".to_string(), "-0.5".to_string(), "1e10".to_string()],
             fields: None,

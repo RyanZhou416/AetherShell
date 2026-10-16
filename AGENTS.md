@@ -8,7 +8,7 @@
 - **Tagline**: One language, every platform, deterministic typed output
 - **Binary**: `ae`
 - **Language**: Rust
-- **Source build**: 12.0.2+ryan.7
+- **Source build**: 12.0.2+ryan.8
 - **Repository**: https://github.com/nervosys/AetherShell
 - **License**: AGPL-3.0-or-later
 - **File Extension**: `.ae`
@@ -53,7 +53,7 @@ proc_run(["git", "--version"], {encoding: "utf-8"})
 
 Use raw strings for opaque text. Ordinary interpolation holes require exactly one expression and a closing brace; syntax or evaluation failures fail the operation rather than becoming successful error text. Ordinary double quotes interpret `\\`, `\"`, `\n`, `\r` and `\t`; an unknown escape or missing closing quote is an error. Ordinary single quotes preserve backslashes but still interpolate `${...}`. `proc_run` keeps output bytes as base64 and reports decoding separately from process success; use `encoding: "bytes"` to avoid decoding. [Process execution](docs/api/PROCESS_RUN.md) documents bounds and result fields.
 
-Exact native integers use signed i64. Source integer literals and k/K/M/G scaling outside that range are parse errors, never zero or saturation. Binary subtraction does not depend on spacing; write negative function arguments as `abs(-7)` rather than `abs -7`. Integer arithmetic overflow is an error, not wrapping; JSON text ingestion rejects larger integer literals rather than silently rounding them. Keep larger exact identifiers quoted as JSON strings, and remember that the DSH adapter has its own narrower exact-number limit. `avg([])` is an error, `sum([])` is zero, and a materialized `range` is bounded at 1,000,000 items before allocation.
+Scientific `e`/`E` notation such as `1e3` and `1.25e-2` is a single Float literal. Malformed exponents, overflowing Float literals and unsupported attached forms (`1e3foo`, `0x10`, `1_000`, `1.5k`) are parse errors, not partial values. Exact native integers use signed i64. Source integer literals and k/K/M/G scaling outside that range are parse errors, never zero or saturation. Binary subtraction does not depend on spacing; write negative function arguments as `abs(-7)` rather than `abs -7`. Integer arithmetic overflow is an error, not wrapping; JSON text ingestion rejects larger integer literals rather than silently rounding them. Keep larger exact identifiers quoted as JSON strings, and remember that the DSH adapter has its own narrower exact-number limit. `avg([])` is an error, `sum([])` is zero, and a materialized `range` is bounded at 1,000,000 items before allocation.
 
 ### Option 2: Call the Agent API (HTTP)
 

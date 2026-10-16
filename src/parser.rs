@@ -359,11 +359,7 @@ fn lex(src: &str) -> Result<Vec<Spanned>, ParseError> {
         }
     }
 
-    // Helper: read number (optionally with a leading '-' already consumed).
-    //
-    // An SI form that does not fit `i64` is refused as one lexeme — digits and
-    // suffix together — instead of being left to the parser as an unscaled
-    // integer with a stray identifier after it.
+    // A complete numeric lexeme, optionally with an already consumed sign.
     fn read_number(
         chars: &[char],
         pos: &mut usize,
@@ -384,41 +380,60 @@ fn lex(src: &str) -> Result<Vec<Spanned>, ParseError> {
                 break;
             }
         }
-        // optional fraction
-        if peek(chars, *pos) == Some('.') {
-            // Check it's not followed by another dot (like range operator ..)
-            if peek_next(chars, *pos) != Some('.') {
-                acc.push('.');
-                advance(chars, pos, line, col);
-                while let Some(ch) = peek(chars, *pos) {
-                    if ch.is_ascii_digit() {
-                        acc.push(ch);
-                        advance(chars, pos, line, col);
-                    } else {
-                        break;
-                    }
+        let mut floating = false;
+        if peek(chars, *pos) == Some('.') && peek_next(chars, *pos) != Some('.') {
+            floating = true;
+            acc.push('.');
+            advance(chars, pos, line, col);
+            while let Some(ch) = peek(chars, *pos) {
+                if !ch.is_ascii_digit() {
+                    break;
                 }
-                return Ok((Tok::Float, acc));
+                acc.push(ch);
+                advance(chars, pos, line, col);
             }
         }
-        // SI suffix on integer literals: 1k / 1M / 1G → scaled Int, in the lexer
-        // (Phase 5: terse numeric form lives in the grammar, not a text pre-pass).
-        // Only fires when the char after the suffix isn't alphanumeric/_, so
-        // identifiers like `1key` are unaffected.
-        if let Some(suffix) = peek(chars, *pos) {
-            let mult = match suffix {
-                'k' | 'K' => Some(1_000i64),
-                'M' => Some(1_000_000i64),
-                'G' => Some(1_000_000_000i64),
-                _ => None,
-            };
-            if let Some(m) = mult {
-                let after_ok = match peek_next(chars, *pos) {
-                    Some(c) => !c.is_alphanumeric() && c != '_',
-                    None => true,
+        if matches!(peek(chars, *pos), Some('e' | 'E')) {
+            floating = true;
+            acc.push(advance(chars, pos, line, col).expect("the exponent marker was observed"));
+            if matches!(peek(chars, *pos), Some('+' | '-')) {
+                acc.push(advance(chars, pos, line, col).expect("the exponent sign was observed"));
+            }
+            let exponent_start = *pos;
+            while let Some(ch) = peek(chars, *pos) {
+                if !ch.is_ascii_digit() {
+                    break;
+                }
+                acc.push(ch);
+                advance(chars, pos, line, col);
+            }
+            if *pos == exponent_start {
+                let tail: String = chars[*pos..]
+                    .iter()
+                    .take_while(|ch| ch.is_alphanumeric() || **ch == '_')
+                    .collect();
+                return Err(ParseError::with_hint(
+                    format!("invalid numeric literal `{acc}{tail}` at line {open_line}, column {open_col}: the exponent requires at least one digit"),
+                    "write digits after e/E and its optional sign, for example 1e3 or 1e-3",
+                ));
+            }
+        }
+        // Integer SI suffixes do not combine with a fraction or exponent.
+        if !floating {
+            if let Some(suffix) = peek(chars, *pos) {
+                let mult = match suffix {
+                    'k' | 'K' => Some(1_000i64),
+                    'M' => Some(1_000_000i64),
+                    'G' => Some(1_000_000_000i64),
+                    _ => None,
                 };
-                if after_ok {
-                    let scaled = acc
+                if let Some(m) = mult {
+                    let after_ok = match peek_next(chars, *pos) {
+                        Some(c) => !c.is_alphanumeric() && c != '_',
+                        None => true,
+                    };
+                    if after_ok {
+                        let scaled = acc
                         .parse::<i64>()
                         .ok()
                         .and_then(|n| n.checked_mul(m))
@@ -430,12 +445,23 @@ fn lex(src: &str) -> Result<Vec<Spanned>, ParseError> {
                                 "keep the magnitude as a String, or use a value the suffix scales within i64",
                             )
                         })?;
-                    advance(chars, pos, line, col); // consume the suffix
-                    return Ok((Tok::Int, scaled.to_string()));
+                        advance(chars, pos, line, col); // consume the suffix
+                        return Ok((Tok::Int, scaled.to_string()));
+                    }
                 }
             }
         }
-        Ok((Tok::Int, acc))
+        if peek(chars, *pos).is_some_and(|ch| ch.is_alphanumeric() || ch == '_') {
+            let tail: String = chars[*pos..]
+                .iter()
+                .take_while(|ch| ch.is_alphanumeric() || **ch == '_')
+                .collect();
+            return Err(ParseError::with_hint(
+                format!("invalid numeric literal `{acc}{tail}` at line {open_line}, column {open_col}: unsupported numeric suffix"),
+                "separate numbers from identifiers; supported numeric forms are integers, decimals, e/E exponents and integer k/K/M/G suffixes",
+            ));
+        }
+        Ok((if floating { Tok::Float } else { Tok::Int }, acc))
     }
 
     while let Some(c) = peek(&chars, pos) {
@@ -1969,7 +1995,13 @@ impl Parser {
             return Ok(Expr::LitRawStr(s));
         }
         if self.match_tok(Tok::Float) {
-            let x: f64 = self.prev().text.parse().unwrap_or(0.0);
+            let tok = self.prev();
+            let x = tok.text.parse::<f64>().ok().filter(|value| value.is_finite()).ok_or_else(|| {
+                ParseError::with_hint(
+                    format!("float literal `{}` at line {}, column {} is not a finite 64-bit Float", tok.text, tok.line, tok.col),
+                    "use a finite Float literal, or quote the exact magnitude as a String; decimal and exponent forms use f64 precision",
+                )
+            })?;
             return Ok(Expr::LitFloat(x));
         }
         if self.match_tok(Tok::Int) {
